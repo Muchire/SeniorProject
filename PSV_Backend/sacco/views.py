@@ -1,7 +1,7 @@
-from rest_framework import generics, filters
+from rest_framework import generics, filters, permissions
 from django_filters.rest_framework import DjangoFilterBackend
-from sacco.models import Sacco
-from sacco.serializers import SaccoSerializer
+from sacco.models import Sacco, SaccoAdminRequest
+from sacco.serializers import SaccoSerializer, SaccoAdminRequestSerializer
 
 class SaccoListCreateView(generics.ListCreateAPIView):
     queryset = Sacco.objects.all()
@@ -15,3 +15,23 @@ class SaccoListCreateView(generics.ListCreateAPIView):
 class SaccoDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Sacco.objects.all()
     serializer_class = SaccoSerializer
+class RequestSaccoAdminView(generics.CreateAPIView):
+    serializer_class = SaccoAdminRequestSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+class ApproveSaccoAdminView(generics.UpdateAPIView):
+    queryset = SaccoAdminRequest.objects.all()
+    serializer_class = SaccoAdminRequestSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+    def perform_update(self, serializer):
+        request = serializer.save(approved=True)
+        Sacco.objects.create(
+            name=request.sacco_name,
+            location=request.sacco_location,
+            sacco_admin=request.user
+        )
+

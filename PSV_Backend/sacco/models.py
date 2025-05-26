@@ -1,6 +1,5 @@
 from django.db import models
-
-
+from django.conf import settings
 # Create your models here.
 class Sacco(models.Model):
     name= models.CharField(max_length=100)
@@ -12,12 +11,26 @@ class Sacco(models.Model):
     email = models.EmailField()
     website = models.URLField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    sacco_admin = models.OneToOneField(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
 
 
 
     def __str__(self):
         return str(self.name  )
 
+class SaccoAdminRequest(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    sacco = models.ForeignKey(Sacco, null=True, blank=True, on_delete=models.CASCADE)
+    sacco_name = models.CharField(max_length=255, blank=True)
+    location = models.CharField(max_length=255, blank=True)
+    is_approved = models.BooleanField(default=False)
+    reviewed = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f" {self.user}request for {self.sacco or self.sacco_name}"
+    
 # class Route(models.Model):
 #     start_location = models.CharField(max_length=100)
 #     end_location = models.CharField(max_length=100)
