@@ -4,7 +4,8 @@ from django.conf import settings
 class Sacco(models.Model):
     name= models.CharField(max_length=100)
     location = models.CharField(max_length=100)
-    date_established = models.DateField()
+    date_established = models.DateField(null=True, blank=True,
+                                        help_text="The date the SACCO was established")
     """I'm using the date established as the registration number"""
     registration_number = models.CharField(max_length=100, unique=True)
     contact_number = models.CharField(max_length=15)
@@ -22,9 +23,10 @@ class Sacco(models.Model):
 
 class SaccoAdminRequest(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    
     sacco = models.ForeignKey(Sacco, null=True, blank=True, on_delete=models.CASCADE)
-    sacco_name = models.CharField(max_length=255, blank=True)
     location = models.CharField(max_length=255, blank=True)
+    sacco_name = models.CharField(max_length=255, blank=True)
     is_approved = models.BooleanField(default=False)
     reviewed = models.BooleanField(default=False)
 

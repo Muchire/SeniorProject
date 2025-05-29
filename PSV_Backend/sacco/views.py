@@ -22,16 +22,26 @@ class RequestSaccoAdminView(generics.CreateAPIView):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
+class SaccoAdminRequestListView(generics.ListAPIView):
+    queryset = SaccoAdminRequest.objects.all()
+    serializer_class = SaccoAdminRequestSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+    def get_queryset(self):
+        return self.queryset.filter(is_approved=False)
+
 class ApproveSaccoAdminView(generics.UpdateAPIView):
     queryset = SaccoAdminRequest.objects.all()
     serializer_class = SaccoAdminRequestSerializer
     permission_classes = [permissions.IsAdminUser]
 
     def perform_update(self, serializer):
-        request = serializer.save(approved=True)
+        instance = serializer.save(approved=True)
         Sacco.objects.create(
-            name=request.sacco_name,
-            location=request.sacco_location,
-            sacco_admin=request.user
+            name=instance.sacco_name,
+            sacco_admin=instance.user
         )
+        if instance.is_approved:
+            instance.user.is_staff = True  
+            instance.user.save()
 
