@@ -1,3 +1,11 @@
 from django.db import models
+from django.contrib.auth.models import AbstractUser
 
-# Create your models here.
+class User(AbstractUser):
+    is_passenger = models.BooleanField(default=True)
+    is_vehicle_owner = models.BooleanField(default=False)
+    is_sacco_admin = models.BooleanField(default=False)  # Track admin approval
+    sacco_admin_requested = models.BooleanField(default=False)  # Track request status
+
+    def __str__(self):
+        return str(self.username)
