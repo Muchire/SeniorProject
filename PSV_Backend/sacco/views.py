@@ -30,10 +30,12 @@ class RequestSaccoAdminView(generics.CreateAPIView):
 class SaccoAdminRequestListView(generics.ListAPIView):
     queryset = SaccoAdminRequest.objects.all()
     serializer_class = SaccoAdminRequestSerializer
-    permission_classes = [permissions.IsAdminUser]
+    # permission_classes = [permissions.IsAdminUser]
 
     def get_queryset(self):
         return self.queryset.filter(is_approved=False)
+
+from django.contrib.auth import get_user_model
 
 class ApproveSaccoAdminView(APIView):
     permission_classes = [permissions.IsAdminUser]
@@ -55,19 +57,20 @@ class ApproveSaccoAdminView(APIView):
                 contact_number=req.contact_number,
                 email=req.email,
                 website=req.website,
-                sacco_admin=req.user
             )
             req.sacco = sacco
 
         sacco.sacco_admin = req.user
         sacco.save()
 
+        # Reload user before modifying
+        user = get_user_model().objects.get(pk=req.user.pk)
+        user.is_sacco_admin = True
+        user.sacco_admin_requested = False
+        user.save()
+
         req.is_approved = True
         req.reviewed = True
         req.save()
-        req.user.is_sacco_admin = True
-        req.user.sacco_admin_requested = False
-        req.user.save()
 
         return Response({"detail": "Sacco admin request approved."})
-

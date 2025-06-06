@@ -16,17 +16,13 @@ class Sacco(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
     )
 
-
-
     def __str__(self):
         return str(self.name  )
 
 class SaccoAdminRequest(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    
-    sacco = models.ForeignKey(Sacco, null=True, blank=True, on_delete=models.CASCADE)  # If sacco exists
+    sacco = models.ForeignKey(Sacco, null=True, blank=True, on_delete=models.CASCADE)
 
-    # If creating a new sacco
     sacco_name = models.CharField(max_length=255, blank=True)
     location = models.CharField(max_length=255, blank=True)
     date_established = models.DateField(null=True, blank=True)
@@ -35,11 +31,12 @@ class SaccoAdminRequest(models.Model):
     email = models.EmailField(blank=True)
     website = models.URLField(blank=True, null=True)
 
-    is_approved = models.BooleanField(default=False)
-    reviewed = models.BooleanField(default=False)
+    is_approved = models.BooleanField(default=False)  # Approve status
+    reviewed = models.BooleanField(default=False)  # Track review status
 
     def __str__(self):
-        return f"{self.user} request for {self.sacco or self.sacco_name}"
+        return f"{self.user.username} request for {self.sacco or self.sacco_name}"
+
 
     
 # class Route(models.Model):
