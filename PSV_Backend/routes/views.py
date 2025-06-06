@@ -1,4 +1,5 @@
 from rest_framework import generics, filters
+from rest_framework import permissions
 from rest_framework.generics import ListAPIView
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -14,10 +15,12 @@ from .serializers import RouteSerializer
 # List and create routes
 class RouteListCreateView(generics.ListCreateAPIView):
     queryset = Route.objects.all().select_related('sacco').prefetch_related('stops')
+    # permission_classes = [permissions.IsAuthenticated]
     serializer_class = RouteSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['start_location', 'end_location', 'sacco']
     search_fields = ['start_location', 'end_location', 'sacco__name']
+    
 
 # Show all routes for a given start location
 class SaccosFromLocationView(ListAPIView):
