@@ -24,14 +24,23 @@ class Sacco(models.Model):
 class SaccoAdminRequest(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     
-    sacco = models.ForeignKey(Sacco, null=True, blank=True, on_delete=models.CASCADE)
-    location = models.CharField(max_length=255, blank=True)
+    sacco = models.ForeignKey(Sacco, null=True, blank=True, on_delete=models.CASCADE)  # If sacco exists
+
+    # If creating a new sacco
     sacco_name = models.CharField(max_length=255, blank=True)
+    location = models.CharField(max_length=255, blank=True)
+    date_established = models.DateField(null=True, blank=True)
+    registration_number = models.CharField(max_length=100, blank=True)
+    contact_number = models.CharField(max_length=15, blank=True)
+    email = models.EmailField(blank=True)
+    website = models.URLField(blank=True, null=True)
+
     is_approved = models.BooleanField(default=False)
     reviewed = models.BooleanField(default=False)
 
     def __str__(self):
-        return f" {self.user}request for {self.sacco or self.sacco_name}"
+        return f"{self.user} request for {self.sacco or self.sacco_name}"
+
     
 # class Route(models.Model):
 #     start_location = models.CharField(max_length=100)

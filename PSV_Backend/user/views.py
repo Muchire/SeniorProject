@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authtoken.models import Token
-# from .models import User
+from .models import User
 from .serializers import (
     RegisterSerializer, LoginSerializer,
     UserSerializer, SwitchUserModeSerializer
@@ -36,7 +36,15 @@ class LoginView(APIView):
                 "user": UserSerializer(user).data
             })
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+class UserListView(APIView):
+    # permission_classes = [IsAuthenticated]
+    queryset = User.objects.all()
 
+    def get(self, request):
+        queryset = User.objects.all()
+        serializer = UserSerializer(queryset, many=True)
+        return Response(serializer.data)
+    
 
 # class RequestSaccoAdminAccess(APIView):
 #     permission_classes = [IsAuthenticated]
