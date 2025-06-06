@@ -3,47 +3,42 @@ from sacco.models import Sacco, SaccoAdminRequest
 
 
 class SaccoSerializer(serializers.ModelSerializer):
+    sacco_admin = serializers.StringRelatedField()  # Assuming user is a ForeignKey to User model
     class Meta:
         model= Sacco
         fields = '__all__'
+
+    
 # serializers.py
 
 class SaccoAdminRequestSerializer(serializers.ModelSerializer):
-    sacco = serializers.PrimaryKeyRelatedField(
-        queryset=Sacco.objects.all(), required=False, allow_null=True
+    sacco = SaccoSerializer(read_only=True)  # Return full Sacco details
+    sacco_id = serializers.PrimaryKeyRelatedField(
+        queryset=Sacco.objects.all(), source="sacco", write_only=True
     )
-
+    user = serializers.StringRelatedField()
     class Meta:
         model = SaccoAdminRequest
-        fields = '__all__'
-        read_only_fields = ['is_approved', 'reviewed', 'user']
+        
+        fields = [
+            "id", "sacco", "sacco_id", "sacco_name", "location",
+            "date_established", "registration_number", "contact_number",
+            "email", "website", "is_approved", "reviewed", "user"
+        ]
+        read_only_fields = ["is_approved", "reviewed", "user"]
+        
 
-    def validate(self, data):
-        # If no sacco is selected, user must provide full sacco details
-        if not data.get("sacco"):
-            required_fields = ['sacco_name', 'location', 'registration_number', 'contact_number', 'email']
-            missing = [field for field in required_fields if not self.initial_data.get(field)]
-            if missing:
-                raise serializers.ValidationError({
-                    "missing_fields": f"Missing fields for new Sacco: {', '.join(missing)}"
-                })
-        return data
+    def to_representation(self, instance):
+        """Ensure Sacco details are returned even if requested for an existing Sacco"""
+        representation = super().to_representation(instance)
 
-    def create(self, validated_data):
-        user = self.context['request'].user
+        if instance.sacco:  # If sacco exists, auto-fill fields
+            representation["sacco_name"] = instance.sacco.name
+            representation["location"] = instance.sacco.location
+            representation["date_established"] = instance.sacco.date_established
+            representation["registration_number"] = instance.sacco.registration_number
+            representation["contact_number"] = instance.sacco.contact_number
+            representation["email"] = instance.sacco.email
+            representation["website"] = instance.sacco.website
 
-        # If no existing sacco is selected, create a new one
-        if not validated_data.get("sacco"):
-            sacco = Sacco.objects.create(
-                name=validated_data['sacco_name'],
-                location=validated_data['location'],
-                date_established=validated_data.get('date_established'),
-                registration_number=validated_data['registration_number'],
-                contact_number=validated_data['contact_number'],
-                email=validated_data['email'],
-                website=validated_data.get('website'),
-            )
-            validated_data['sacco'] = sacco
-
-        validated_data['user'] = user
-        return super().create(validated_data)
+        return representation
