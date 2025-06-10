@@ -42,3 +42,15 @@ class SaccoAdminRequestSerializer(serializers.ModelSerializer):
             representation["website"] = instance.sacco.website
 
         return representation
+    def validate(self, data):
+        if not data.get("sacco"):  # sacco_id not provided
+            required_fields = [
+                "sacco_name", "location", "date_established",
+                "registration_number", "contact_number", "email"
+            ]
+            missing_fields = [field for field in required_fields if not self.initial_data.get(field)]
+            if missing_fields:
+                raise serializers.ValidationError(
+                    f"You must provide all required Sacco details if no existing Sacco is selected: {', '.join(missing_fields)}"
+                )
+        return data

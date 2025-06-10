@@ -136,6 +136,30 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 remember to change this to a secret later"""
 CORS_ALLOW_ALL_ORIGINS = True
 
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",  # If testing locally
+    "http://127.0.0.1:8000",  # Django's local server
+    "http://your_flutter_app_url.com",  # Replace with actual deployed Flutter app URL
+]
+
+CORS_ALLOW_METHODS = [
+    "GET",
+    "POST",
+    "PUT",
+    "DELETE",
+    "OPTIONS",
+]
+
+CORS_ALLOW_HEADERS = [
+    "authorization",
+    "content-type",
+    "accept",
+    "origin",
+    "user-agent",
+    "x-requested-with",
+]
+
+
 REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
