@@ -69,6 +69,33 @@ class UserProfileView(APIView):
 class SwitchUserModeView(APIView):
     permission_classes = [IsAuthenticated]
     
+    def get_user_roles(self, user):
+        """Get all roles a user has access to"""
+        roles = []
+        
+        # Everyone can be a passenger
+        roles.append('passenger')
+        
+        # Check if user is approved as vehicle owner
+        if hasattr(user, 'is_vehicle_owner') and user.is_vehicle_owner:
+            roles.append('vehicle_owner')
+            
+        # Check if user is approved as sacco admin
+        if hasattr(user, 'is_sacco_admin') and user.is_sacco_admin:
+            roles.append('sacco_admin')
+            
+        return roles
+    
+    def get_current_active_role(self, user):
+        """Determine the current active role based on flags"""
+        # Priority: sacco_admin > vehicle_owner > passenger
+        if getattr(user, 'is_sacco_admin', False):
+            return 'sacco_admin'
+        elif getattr(user, 'is_vehicle_owner', False):
+            return 'vehicle_owner'
+        else:
+            return 'passenger'
+    
     def post(self, request):
         """Switch user's active role"""
         serializer = SwitchUserModeSerializer(data=request.data)
@@ -76,28 +103,28 @@ class SwitchUserModeView(APIView):
             user = request.user
             target_role = serializer.validated_data['switch_to']
             
-            # Get available roles using the same logic as the profile serializer
-            profile_serializer = UserProfileSerializer(user)
-            current_role = profile_serializer.get_current_role(user)
-            available_roles = profile_serializer.get_available_roles(user)
+            # Get user's available roles
+            available_roles = self.get_user_roles(user)
             
             # Check if the target role is available
-            all_eligible_roles = available_roles + [current_role]
-            
-            if target_role not in all_eligible_roles:
+            if target_role not in available_roles:
                 role_messages = {
                     'passenger': "You don't have passenger access.",
                     'vehicle_owner': "You are not registered as a vehicle owner.",
                     'sacco_admin': "You are not approved as a sacco admin."
                 }
                 return Response({
-                    "detail": role_messages.get(target_role, "You don't have access to this role.")
+                    "detail": role_messages.get(target_role, "You don't have access to this role."),
+                    "available_roles": available_roles
                 }, status=status.HTTP_403_FORBIDDEN)
             
-            # Reset all role flags
+            # Instead of resetting all flags, we set the active role
+            # Keep the permanent roles (like is_sacco_admin) but change the active one
+            
+            # Reset active role flags first
             user.is_passenger = False
             user.is_vehicle_owner = False
-            user.is_sacco_admin = False
+            # Don't reset is_sacco_admin as it's a permanent status once approved
             
             # Set the target role as active
             if target_role == 'passenger':
@@ -105,6 +132,7 @@ class SwitchUserModeView(APIView):
             elif target_role == 'vehicle_owner':
                 user.is_vehicle_owner = True
             elif target_role == 'sacco_admin':
+                # For sacco admin, we need to ensure they have the flag
                 user.is_sacco_admin = True
             
             user.save()
@@ -119,6 +147,7 @@ class SwitchUserModeView(APIView):
             return Response({
                 "message": f"Successfully switched to {target_role} mode.",
                 "current_role": target_role,
+                "available_roles": available_roles,
                 "redirect_url": redirect_urls.get(target_role, '/'),
                 "user": {
                     "id": user.id,
@@ -130,9 +159,7 @@ class SwitchUserModeView(APIView):
                 }
             }, status=status.HTTP_200_OK)
         
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-# class UserStatsView(APIView):
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)# class UserStatsView(APIView):
 #     permission_classes = [IsAuthenticated]
     
 #     def get(self, request):

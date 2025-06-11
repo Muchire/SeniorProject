@@ -186,3 +186,22 @@ LOGGING = {
         'level': 'INFO',  # Set to DEBUG for more verbose output
     },
 }
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'loggers': {
+        'sacco.views': {
+            'handlers': ['console'],
+            'level': 'INFO',
+        },
+        'sacco.admin': {
+            'handlers': ['console'],
+            'level': 'INFO',
+        },
+    },
+}

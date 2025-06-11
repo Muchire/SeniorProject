@@ -14,7 +14,7 @@ class SaccoSerializer(serializers.ModelSerializer):
 class SaccoAdminRequestSerializer(serializers.ModelSerializer):
     sacco = SaccoSerializer(read_only=True)  # Return full Sacco details
     sacco_id = serializers.PrimaryKeyRelatedField(
-        queryset=Sacco.objects.all(), source="sacco", write_only=True
+        queryset=Sacco.objects.all(), source="sacco", write_only=True, required=False
     )
     user = serializers.StringRelatedField()
     class Meta:
@@ -42,8 +42,12 @@ class SaccoAdminRequestSerializer(serializers.ModelSerializer):
             representation["website"] = instance.sacco.website
 
         return representation
+    
     def validate(self, data):
-        if not data.get("sacco"):  # sacco_id not provided
+        # Check if sacco_id was provided in the request (before it gets processed to 'sacco')
+        sacco_id_provided = 'sacco_id' in self.initial_data and self.initial_data['sacco_id']
+        
+        if not sacco_id_provided:  # No existing sacco selected, validate new sacco fields
             required_fields = [
                 "sacco_name", "location", "date_established",
                 "registration_number", "contact_number", "email"
