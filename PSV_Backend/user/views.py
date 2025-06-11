@@ -69,33 +69,6 @@ class UserProfileView(APIView):
 class SwitchUserModeView(APIView):
     permission_classes = [IsAuthenticated]
     
-    def get_user_roles(self, user):
-        """Get all roles a user has access to"""
-        roles = []
-        
-        # Everyone can be a passenger
-        roles.append('passenger')
-        
-        # Check if user is approved as vehicle owner
-        if hasattr(user, 'is_vehicle_owner') and user.is_vehicle_owner:
-            roles.append('vehicle_owner')
-            
-        # Check if user is approved as sacco admin
-        if hasattr(user, 'is_sacco_admin') and user.is_sacco_admin:
-            roles.append('sacco_admin')
-            
-        return roles
-    
-    def get_current_active_role(self, user):
-        """Determine the current active role based on flags"""
-        # Priority: sacco_admin > vehicle_owner > passenger
-        if getattr(user, 'is_sacco_admin', False):
-            return 'sacco_admin'
-        elif getattr(user, 'is_vehicle_owner', False):
-            return 'vehicle_owner'
-        else:
-            return 'passenger'
-    
     def post(self, request):
         """Switch user's active role"""
         serializer = SwitchUserModeSerializer(data=request.data)
@@ -103,38 +76,30 @@ class SwitchUserModeView(APIView):
             user = request.user
             target_role = serializer.validated_data['switch_to']
             
-            # Get user's available roles
-            available_roles = self.get_user_roles(user)
+            # Check if user has permission for this role
+            role_permissions = {
+                'passenger': True,  # Everyone can be a passenger
+                'vehicle_owner': user.is_vehicle_owner,
+                'sacco_admin': user.is_sacco_admin
+            }
             
-            # Check if the target role is available
-            if target_role not in available_roles:
+            if not role_permissions.get(target_role, False):
                 role_messages = {
-                    'passenger': "You don't have passenger access.",
                     'vehicle_owner': "You are not registered as a vehicle owner.",
                     'sacco_admin': "You are not approved as a sacco admin."
                 }
                 return Response({
-                    "detail": role_messages.get(target_role, "You don't have access to this role."),
-                    "available_roles": available_roles
+                    "detail": role_messages.get(target_role, "You don't have access to this role.")
                 }, status=status.HTTP_403_FORBIDDEN)
             
-            # Instead of resetting all flags, we set the active role
-            # Keep the permanent roles (like is_sacco_admin) but change the active one
+            # REMOVE THE OLD LOGIC - Don't reset the role flags anymore
+            # OLD CODE (remove this):
+            # user.is_passenger = False
+            # user.is_vehicle_owner = False  
+            # user.is_sacco_admin = False
             
-            # Reset active role flags first
-            user.is_passenger = False
-            user.is_vehicle_owner = False
-            # Don't reset is_sacco_admin as it's a permanent status once approved
-            
-            # Set the target role as active
-            if target_role == 'passenger':
-                user.is_passenger = True
-            elif target_role == 'vehicle_owner':
-                user.is_vehicle_owner = True
-            elif target_role == 'sacco_admin':
-                # For sacco admin, we need to ensure they have the flag
-                user.is_sacco_admin = True
-            
+            # NEW LOGIC - Just update the current_role field
+            user.current_role = target_role
             user.save()
             
             # Determine redirect URL based on role
@@ -147,12 +112,12 @@ class SwitchUserModeView(APIView):
             return Response({
                 "message": f"Successfully switched to {target_role} mode.",
                 "current_role": target_role,
-                "available_roles": available_roles,
                 "redirect_url": redirect_urls.get(target_role, '/'),
                 "user": {
                     "id": user.id,
                     "username": user.username,
                     "current_role": target_role,
+                    # These should reflect the PERMISSIONS, not current role
                     "is_passenger": user.is_passenger,
                     "is_vehicle_owner": user.is_vehicle_owner,
                     "is_sacco_admin": user.is_sacco_admin,
@@ -186,11 +151,7 @@ class UserReviewsView(APIView):
 
     def get(self, request):
         user = request.user
-        current_role = 'passenger'
-        if user.is_vehicle_owner:
-            current_role = 'vehicle_owner'
-        elif user.is_sacco_admin:
-            current_role = 'sacco_admin'
+        current_role = user.current_role()  # Assuming this method returns 'passenger', 'vehicle_owner', or 'sacco_admin'
 
         reviews_data = []
 
