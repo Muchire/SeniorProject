@@ -151,8 +151,17 @@ class UserReviewsView(APIView):
 
     def get(self, request):
         user = request.user
-        current_role = user.current_role()  # Assuming this method returns 'passenger', 'vehicle_owner', or 'sacco_admin'
-
+        
+        # Get current role - using the method from UserProfileSerializer
+        def get_current_role(user):
+            if user.is_sacco_admin:
+                return 'sacco_admin'
+            elif user.is_vehicle_owner:
+                return 'vehicle_owner'
+            else:
+                return 'passenger'  # Default role
+        
+        current_role = get_current_role(user)
         reviews_data = []
 
         if current_role == 'passenger':
@@ -205,6 +214,8 @@ class UserReviewsView(APIView):
 
         # For sacco_admin, we don't return reviews (admins don't post reviews)
         return Response(reviews_data, status=status.HTTP_200_OK)
+
+
 class UpdateProfileView(APIView):
     permission_classes = [IsAuthenticated]
 
