@@ -2,8 +2,7 @@
 from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
-from django.db.models import Avg, Count, Q
+from django.db.models import Avg
 from django.db import transaction
 from rest_framework.serializers import ValidationError
 from sacco.serializers import SaccoSerializer

@@ -48,3 +48,16 @@ class RouteSearchView(APIView):
 
         serializer = RouteSerializer(routes, many=True)
         return Response(serializer.data)
+# Add this view to your routes/views.py
+
+class RoutesBySaccoView(ListAPIView):
+    serializer_class = RouteSerializer
+
+    def get_queryset(self):
+        sacco_id = self.kwargs.get('sacco_id')
+        return Route.objects.filter(sacco_id=sacco_id).select_related('sacco').prefetch_related('stops')
+    
+class RouteDetailView(generics.RetrieveAPIView):
+    queryset = Route.objects.all().select_related('sacco').prefetch_related('stops')
+    serializer_class = RouteSerializer
+    lookup_field = 'id'
