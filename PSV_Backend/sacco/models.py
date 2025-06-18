@@ -35,17 +35,4 @@ class SaccoAdminRequest(models.Model):
     reviewed = models.BooleanField(default=False)  # Track review status
 
     def __str__(self):
-        return f"{self.user.username} request for {self.sacco or self.sacco_name}"
-
-
-    
-# class Route(models.Model):
-#     start_location = models.CharField(max_length=100)
-#     end_location = models.CharField(max_length=100)
-#     distance = models.DecimalField(max_digits=5, decimal_places=2)
-#     duration = models.DurationField()
-#     fare = models.DecimalField(max_digits=10, decimal_places=2)
-#     sacco = models.ForeignKey(Sacco, on_delete=models.CASCADE, related_name='routes')
-    
-#     def __str__(self):
-#         return f"{self.start_location} to {self.end_location} with {self.sacco.name}"
+        return f"{self.username} request for {self.sacco or self.sacco_name}"
