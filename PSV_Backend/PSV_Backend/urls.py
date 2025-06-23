@@ -24,5 +24,6 @@ urlpatterns = [
     path('api/user/', include('user.urls')),
     path('api/reviews/', include('reviews.urls')),
     path('api/sacco_admin/', include('sacco_admin_app.urls')),
+    path('api/vehicles/', include('vehicles.urls')),
 
 ]

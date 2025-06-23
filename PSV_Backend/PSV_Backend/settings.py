@@ -42,6 +42,8 @@ INSTALLED_APPS = [
     'routes',
     'sacco',
     'user',
+    'vehicles',
+    'sacco_admin_app',
     'rest_framework',
     'rest_framework.authtoken',
     'corsheaders',
