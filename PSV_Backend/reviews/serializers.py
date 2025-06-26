@@ -17,5 +17,9 @@ class OwnerReviewSerializer(serializers.ModelSerializer):
     average = serializers.FloatField() 
     class Meta:
         model = OwnerReview
-        fields = "__all__"
+        fields =[
+            'user', 'sacco', 'payment_punctuality', 'driver_responsibility',
+            'rate_fairness', 'support', 'transparency', 'overall', 
+            'average', 'comment', 'created_at'
+        ]
         read_only_fields = ['user', 'average', 'created_at']

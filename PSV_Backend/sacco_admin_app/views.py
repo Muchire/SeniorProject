@@ -11,6 +11,13 @@ from routes.models import Route, RouteStop
 from routes.serializers import RouteSerializer
 from reviews.models import PassengerReview, OwnerReview
 from reviews.serializers import PassengerReviewSerializer, OwnerReviewSerializer
+from vehicles.models import SaccoJoinRequest, Vehicle, VehicleTrip, VehiclePerformance
+from vehicles.serializers import (
+    SaccoAdminJoinRequestSerializer, VehicleSerializer, 
+    VehicleTripSerializer, VehiclePerformanceSerializer
+)
+from django.utils import timezone
+
 
 
 class SaccoAdminPermission(permissions.BasePermission):
@@ -374,3 +381,216 @@ class SaccoAdminRouteWithStopsDetailView(generics.RetrieveUpdateDestroyAPIView):
         except Sacco.DoesNotExist:
             return Route.objects.none()
         
+
+class SaccoAdminJoinRequestListView(generics.ListAPIView):
+    """
+    List all join requests for the admin's sacco with filtering
+    """
+    serializer_class = SaccoAdminJoinRequestSerializer
+    permission_classes = [SaccoAdminPermission]
+    
+    def get_queryset(self):
+        try:
+            sacco = Sacco.objects.get(sacco_admin=self.request.user)
+            queryset = SaccoJoinRequest.objects.filter(sacco=sacco).select_related(
+                'vehicle', 'owner', 'processed_by'
+            ).prefetch_related('preferred_routes')
+            
+            # Filter by status if provided
+            status_filter = self.request.query_params.get('status')
+            if status_filter:
+                queryset = queryset.filter(status=status_filter)
+            
+            return queryset.order_by('-requested_at')
+        except Sacco.DoesNotExist:
+            return SaccoJoinRequest.objects.none()
+
+
+class SaccoAdminJoinRequestDetailView(generics.RetrieveUpdateAPIView):
+    """
+    Retrieve and update a specific join request (approve/reject)
+    """
+    serializer_class = SaccoAdminJoinRequestSerializer
+    permission_classes = [SaccoAdminPermission]
+    
+    def get_queryset(self):
+        try:
+            sacco = Sacco.objects.get(sacco_admin=self.request.user)
+            return SaccoJoinRequest.objects.filter(sacco=sacco).select_related(
+                'vehicle', 'owner', 'processed_by'
+            ).prefetch_related('preferred_routes')
+        except Sacco.DoesNotExist:
+            return SaccoJoinRequest.objects.none()
+    
+    def perform_update(self, serializer):
+        join_request = serializer.save(
+            processed_by=self.request.user,
+            processed_at=timezone.now()
+        )
+        
+        # If approved, update vehicle status
+        if join_request.status == 'approved':
+            vehicle = join_request.vehicle
+            vehicle.sacco = join_request.sacco
+            vehicle.is_approved_by_sacco = True
+            vehicle.date_joined_sacco = timezone.now()
+            vehicle.save()
+
+
+class SaccoAdminJoinRequestActionView(APIView):
+    """
+    Approve or reject join requests with custom logic
+    """
+    permission_classes = [SaccoAdminPermission]
+    
+    def post(self, request, request_id):
+        try:
+            sacco = Sacco.objects.get(sacco_admin=request.user)
+            join_request = get_object_or_404(
+                SaccoJoinRequest, 
+                id=request_id, 
+                sacco=sacco
+            )
+            
+            action = request.data.get('action')  # 'approve', 'reject', 'under_review'
+            admin_notes = request.data.get('admin_notes', '')
+            
+            if action not in ['approve', 'reject', 'under_review']:
+                return Response(
+                    {'error': 'Invalid action. Must be approve, reject, or under_review'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            with transaction.atomic():
+                if action == 'approve':
+                    join_request.status = 'approved'
+                    join_request.processed_by = request.user
+                    join_request.processed_at = timezone.now()
+                    join_request.admin_notes = admin_notes
+                    join_request.save()
+                    
+                    # Update vehicle
+                    vehicle = join_request.vehicle
+                    vehicle.sacco = sacco
+                    vehicle.is_approved_by_sacco = True
+                    vehicle.date_joined_sacco = timezone.now()
+                    vehicle.save()
+                    
+                    message = f'Join request approved. Vehicle {vehicle.registration_number} is now part of {sacco.name}'
+                    
+                elif action == 'reject':
+                    join_request.status = 'rejected'
+                    join_request.processed_by = request.user
+                    join_request.processed_at = timezone.now()
+                    join_request.admin_notes = admin_notes
+                    join_request.save()
+                    
+                    message = 'Join request rejected'
+                    
+                else:  # under_review
+                    join_request.status = 'under_review'
+                    join_request.admin_notes = admin_notes
+                    join_request.save()
+                    
+                    message = 'Join request marked as under review'
+            
+            return Response({
+                'message': message,
+                'request': SaccoAdminJoinRequestSerializer(join_request).data
+            }, status=status.HTTP_200_OK)
+            
+        except Sacco.DoesNotExist:
+            return Response(
+                {'error': 'No sacco found for this admin user'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+
+class SaccoAdminVehicleListView(generics.ListAPIView):
+    """
+    List all vehicles belonging to the admin's sacco
+    """
+    serializer_class = VehicleSerializer
+    permission_classes = [SaccoAdminPermission]
+    
+    def get_queryset(self):
+        try:
+            sacco = Sacco.objects.get(sacco_admin=self.request.user)
+            return Vehicle.objects.filter(
+                sacco=sacco, 
+                is_approved_by_sacco=True
+            ).select_related('owner', 'sacco')
+        except Sacco.DoesNotExist:
+            return Vehicle.objects.none()
+
+
+class SaccoAdminVehicleTripCreateView(generics.CreateAPIView):
+    """
+    Create trip records for vehicles in the sacco
+    """
+    serializer_class = VehicleTripSerializer
+    permission_classes = [SaccoAdminPermission]
+    
+    def perform_create(self, serializer):
+        # Verify that the vehicle belongs to the admin's sacco
+        vehicle_id = serializer.validated_data['vehicle'].id
+        try:
+            sacco = Sacco.objects.get(sacco_admin=self.request.user)
+            vehicle = Vehicle.objects.get(id=vehicle_id, sacco=sacco, is_approved_by_sacco=True)
+            serializer.save()
+        except (Sacco.DoesNotExist, Vehicle.DoesNotExist):
+            raise ValidationError("Vehicle does not belong to your sacco or is not approved")
+
+
+class SaccoAdminVehiclePerformanceCreateView(generics.CreateAPIView):
+    """
+    Create performance records for vehicles in the sacco
+    """
+    serializer_class = VehiclePerformanceSerializer
+    permission_classes = [SaccoAdminPermission]
+    
+    def perform_create(self, serializer):
+        # Verify that the vehicle belongs to the admin's sacco
+        vehicle_id = serializer.validated_data['vehicle'].id
+        try:
+            sacco = Sacco.objects.get(sacco_admin=self.request.user)
+            vehicle = Vehicle.objects.get(id=vehicle_id, sacco=sacco, is_approved_by_sacco=True)
+            serializer.save()
+        except (Sacco.DoesNotExist, Vehicle.DoesNotExist):
+            raise ValidationError("Vehicle does not belong to your sacco or is not approved")
+
+
+class SaccoAdminVehicleTripsListView(generics.ListAPIView):
+    """
+    List all trips for vehicles in the admin's sacco
+    """
+    serializer_class = VehicleTripSerializer
+    permission_classes = [SaccoAdminPermission]
+    
+    def get_queryset(self):
+        try:
+            sacco = Sacco.objects.get(sacco_admin=self.request.user)
+            return VehicleTrip.objects.filter(
+                vehicle__sacco=sacco,
+                vehicle__is_approved_by_sacco=True
+            ).select_related('vehicle', 'route').order_by('-date', '-departure_time')
+        except Sacco.DoesNotExist:
+            return VehicleTrip.objects.none()
+
+
+class SaccoAdminVehiclePerformanceListView(generics.ListAPIView):
+    """
+    List performance records for vehicles in the admin's sacco
+    """
+    serializer_class = VehiclePerformanceSerializer
+    permission_classes = [SaccoAdminPermission]
+    
+    def get_queryset(self):
+        try:
+            sacco = Sacco.objects.get(sacco_admin=self.request.user)
+            return VehiclePerformance.objects.filter(
+                vehicle__sacco=sacco,
+                vehicle__is_approved_by_sacco=True
+            ).select_related('vehicle').order_by('-month')
+        except Sacco.DoesNotExist:
+            return VehiclePerformance.objects.none()
