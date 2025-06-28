@@ -1,22 +1,22 @@
-# PSV_Backend/vehicles/views.py
 from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from django.db.models import Q, Count, Avg, Sum
 from django.utils import timezone
+from django.db import transaction
 from .serializers import (
     EnhancedSaccoDashboardSerializer, VehicleSerializer, VehicleDocumentSerializer, SaccoJoinRequestSerializer,
     VehicleTripSerializer, VehiclePerformanceSerializer,
-    VehicleOwnerDashboardSerializer, VehicleOwnerReviewsSerializer,
+    VehicleOwnerDashboardSerializer, VehicleOwnerReviewsSerializer,RejectRequestSerializer,ApproveRequestSerializer
 )
 from reviews.serializers import OwnerReviewSerializer
 from routes.models import Route
 from sacco.models import Sacco
 from reviews.models import OwnerReview
 from .models import Vehicle, VehicleDocument, SaccoJoinRequest, VehicleTrip, VehiclePerformance
-
 
 
 class VehicleOwnerPermission(permissions.BasePermission):
@@ -114,14 +114,30 @@ class VehicleEarningsEstimationView(APIView):
         })
 
 
-class SaccoJoinRequestCreateView(APIView):
+class SaccoJoinRequestView(generics.ListCreateAPIView):
     """
-    Create a join request for a specific sacco
+    List all join requests for the authenticated user or create a new one
     """
+    serializer_class = SaccoJoinRequestSerializer
     permission_classes = [VehicleOwnerPermission]
     
-    def post(self, request, sacco_id, vehicle_id):
+    def get_queryset(self):
+        return SaccoJoinRequest.objects.filter(
+            owner=self.request.user
+        ).select_related('vehicle', 'sacco', 'processed_by').prefetch_related('preferred_routes')
+    
+    def create(self, request, *args, **kwargs):
         try:
+            # Get sacco_id and vehicle_id from request data
+            sacco_id = request.data.get('sacco_id')
+            vehicle_id = request.data.get('vehicle_id')
+            
+            if not sacco_id or not vehicle_id:
+                return Response(
+                    {'error': 'Both sacco_id and vehicle_id are required'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
             # Get the sacco and vehicle
             sacco = get_object_or_404(Sacco, id=sacco_id)
             vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
@@ -165,7 +181,7 @@ class SaccoJoinRequestCreateView(APIView):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # Create the join request
-            serializer = SaccoJoinRequestSerializer(data=request.data)
+            serializer = self.get_serializer(data=request.data)
             if serializer.is_valid():
                 with transaction.atomic():
                     join_request = serializer.save(
@@ -177,7 +193,8 @@ class SaccoJoinRequestCreateView(APIView):
                 return Response({
                     'message': 'Join request submitted successfully',
                     'request_id': join_request.id,
-                    'status': join_request.status
+                    'status': join_request.status,
+                    'data': serializer.data
                 }, status=status.HTTP_201_CREATED)
             
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -191,10 +208,11 @@ class SaccoJoinRequestCreateView(APIView):
 
 class SaccoJoinRequestDetailView(generics.RetrieveAPIView):
     serializer_class = SaccoJoinRequestSerializer
-    permission_classes = [VehicleOwnerPermission]
     
     def get_queryset(self):
-        return SaccoJoinRequest.objects.filter(owner=self.request.user)
+        return SaccoJoinRequest.objects.filter(
+            owner=self.request.user
+        ).select_related('vehicle', 'sacco', 'processed_by').prefetch_related('preferred_routes')
 
 
 class VehicleTripView(generics.ListCreateAPIView):
@@ -445,10 +463,11 @@ class RouteListView(APIView):
             'total_count': len(route_data)
         })
 
+
 class CreateOwnerReviewView(generics.CreateAPIView):
     """Create or update a review for a sacco as a vehicle owner"""
     permission_classes = [VehicleOwnerPermission]
-    serializer_class = OwnerReviewSerializer  # ✅ Use the correct one
+    serializer_class = OwnerReviewSerializer
 
     def create(self, request, *args, **kwargs):
         sacco_id = kwargs.get('sacco_id')
@@ -469,6 +488,8 @@ class CreateOwnerReviewView(generics.CreateAPIView):
             serializer.save(user=request.user, sacco=sacco)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
 class VehicleStatsView(APIView):
     """Get statistics for a specific vehicle"""
     permission_classes = [VehicleOwnerPermission]
@@ -520,196 +541,209 @@ class VehicleStatsView(APIView):
             },
             'recent_trips': VehicleTripSerializer(recent_trips, many=True).data
         })
-    
-class SaccoDashboardSearchView(APIView):
-    """Enhanced sacco search with complete dashboard information"""
+
+
+class SaccoSearchView(APIView):
+    """Search saccos with filters"""
     permission_classes = [VehicleOwnerPermission]
     
     def get(self, request):
-        # Search parameters
-        search_query = request.query_params.get('search', '')
-        route_filter = request.query_params.get('route', '')
-        location_filter = request.query_params.get('location', '')
-        min_rating = request.query_params.get('min_rating', 0)
+        from sacco.serializers import SaccoSerializer
+        
+        # Get query parameters
+        search = request.query_params.get('search', '')
+        route = request.query_params.get('route', '')
+        location = request.query_params.get('location', '')
+        min_rating = request.query_params.get('min_rating', None)
         
         # Start with all saccos
-        saccos = Sacco.objects.all()
+        saccos = Sacco.objects.all().annotate(
+            avg_owner_rating=Avg('owner_reviews__average'),
+            total_owner_reviews=Count('owner_reviews'),
+            avg_passenger_rating=Avg('passenger_reviews__average'),
+            total_passenger_reviews=Count('passenger_reviews'),
+            total_routes=Count('routes')
+        )
         
         # Apply filters
-        if search_query:
+        if search:
             saccos = saccos.filter(
-                Q(name__icontains=search_query) |
-                Q(location__icontains=search_query)
+                Q(name__icontains=search) | 
+                Q(location__icontains=search)
             )
         
-        if route_filter:
+        if location:
+            saccos = saccos.filter(location__icontains=location)
+            
+        if route:
             saccos = saccos.filter(
-                Q(routes__start_location__icontains=route_filter) |
-                Q(routes__end_location__icontains=route_filter)
+                routes__start_location__icontains=route
             ).distinct()
+            
+        if min_rating:
+            try:
+                min_rating = float(min_rating)
+                saccos = saccos.filter(avg_owner_rating__gte=min_rating)
+            except ValueError:
+                pass
         
-        if location_filter:
-            saccos = saccos.filter(location__icontains=location_filter)
-        
-        # Add rating filter
-        if float(min_rating) > 0:
-            saccos = saccos.annotate(
-                avg_rating=Avg('owner_reviews__average')
-            ).filter(avg_rating__gte=float(min_rating))
-        
-        # Add basic stats for listing
-        saccos = saccos.annotate(
-            total_vehicles=Count('vehicles'),
-            active_vehicles=Count('vehicles', filter=Q(vehicles__is_active=True)),
-            total_routes=Count('routes'),
-            avg_rating=Avg('owner_reviews__average'),
-            total_reviews=Count('owner_reviews')
-        ).order_by('-avg_rating', '-total_vehicles')
-        
-        # Serialize the results
-        results = []
+        # Serialize data
+        sacco_data = []
         for sacco in saccos:
-            results.append({
+            routes = Route.objects.filter(sacco=sacco)
+            sacco_info = {
                 'id': sacco.id,
                 'name': sacco.name,
                 'location': sacco.location,
-                'total_vehicles': sacco.total_vehicles,
-                'active_vehicles': sacco.active_vehicles,
-                'total_routes': sacco.total_routes,
-                'avg_rating': float(sacco.avg_rating or 0),
-                'total_reviews': sacco.total_reviews,
                 'contact_number': sacco.contact_number,
-                'email': sacco.email
-            })
+                'email': sacco.email,
+                'website': sacco.website,
+                'avg_owner_rating': float(sacco.avg_owner_rating or 0),
+                'total_owner_reviews': sacco.total_owner_reviews,
+                'avg_passenger_rating': float(sacco.avg_passenger_rating or 0),
+                'total_passenger_reviews': sacco.total_passenger_reviews,
+                'total_routes': sacco.total_routes,
+            }
+            sacco_data.append(sacco_info)
+        
+        # Sort by rating
+        sacco_data.sort(key=lambda x: x['avg_owner_rating'], reverse=True)
         
         return Response({
-            'results': results,
-            'total_count': len(results),
-            'search_params': {
-                'search': search_query,
-                'route': route_filter,
-                'location': location_filter,
+            'saccos': sacco_data,
+            'total_count': len(sacco_data),
+            'filters_applied': {
+                'search': search,
+                'route': route,
+                'location': location,
                 'min_rating': min_rating
             }
         })
 
 
-class SaccoDetailedDashboardView(APIView):
-    """Get complete detailed dashboard for a specific sacco"""
+class SaccoDashboardView(APIView):
+    """Get dashboard data for a specific sacco"""
     permission_classes = [VehicleOwnerPermission]
     
     def get(self, request, sacco_id):
         sacco = get_object_or_404(Sacco, id=sacco_id)
         
-        # Use the enhanced serializer
-        serializer = EnhancedSaccoDashboardSerializer(sacco)
+        # Get basic stats
+        total_vehicles = Vehicle.objects.filter(sacco=sacco).count()
+        active_vehicles = Vehicle.objects.filter(sacco=sacco, is_active=True).count()
+        total_routes = Route.objects.filter(sacco=sacco).count()
         
-        return Response(serializer.data)
+        # Get review stats
+        owner_reviews = OwnerReview.objects.filter(sacco=sacco)
+        avg_rating = owner_reviews.aggregate(avg=Avg('average'))['avg'] or 0
+        
+        # Get recent performance (you might need to adjust this based on your models)
+        current_month = timezone.now().replace(day=1).date()
+        monthly_stats = VehiclePerformance.objects.filter(
+            vehicle__sacco=sacco,
+            month=current_month
+        ).aggregate(
+            total_trips=Sum('total_trips'),
+            total_revenue=Sum('total_revenue'),
+            total_distance=Sum('total_distance')
+        )
+        
+        return Response({
+            'sacco': {
+                'id': sacco.id,
+                'name': sacco.name,
+                'location': sacco.location,
+                'contact_number': sacco.contact_number,
+                'email': sacco.email
+            },
+            'stats': {
+                'total_vehicles': total_vehicles,
+                'active_vehicles': active_vehicles,
+                'total_routes': total_routes,
+                'average_rating': float(avg_rating),
+                'total_reviews': owner_reviews.count(),
+                'current_month_trips': monthly_stats['total_trips'] or 0,
+                'current_month_revenue': float(monthly_stats['total_revenue'] or 0),
+                'current_month_distance': float(monthly_stats['total_distance'] or 0)
+            }
+        })
 
 
-class SaccoComparisonView(APIView):
-    """Compare multiple saccos side by side"""
+class CompareSaccosView(APIView):
+    """Compare multiple saccos"""
     permission_classes = [VehicleOwnerPermission]
     
     def post(self, request):
         sacco_ids = request.data.get('sacco_ids', [])
         
-        if not sacco_ids or len(sacco_ids) > 5:  # Limit to 5 saccos
+        if not sacco_ids or len(sacco_ids) < 2:
             return Response(
-                {'error': 'Please provide 1-5 sacco IDs for comparison'},
+                {'error': 'Please provide at least 2 sacco IDs for comparison'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        saccos = Sacco.objects.filter(id__in=sacco_ids)
         comparison_data = []
         
-        for sacco in saccos:
-            # Get summary data for comparison
-            vehicles = Vehicle.objects.filter(sacco=sacco, is_active=True)
-            routes = Route.objects.filter(sacco=sacco)
-            reviews = OwnerReview.objects.filter(sacco=sacco)
-            
-            # Calculate average earnings
-            total_earnings = 0
-            vehicle_count = vehicles.count()
-            
-            if vehicle_count > 0:
-                for vehicle in vehicles:
-                    best_earnings = 0
-                    for route in routes:
-                        earnings = vehicle.calculate_monthly_earnings(route)
-                        if earnings['net_earnings'] > best_earnings:
-                            best_earnings = earnings['net_earnings']
-                    total_earnings += best_earnings
+        for sacco_id in sacco_ids:
+            try:
+                sacco = Sacco.objects.get(id=sacco_id)
                 
-                avg_earnings_per_vehicle = total_earnings / vehicle_count
-            else:
-                avg_earnings_per_vehicle = 0
-            
-            # Ratings summary
-            ratings = reviews.aggregate(
-                avg_rating=Avg('average'),
-                avg_payment_punctuality=Avg('payment_punctuality'),
-                avg_rate_fairness=Avg('rate_fairness'),
-                avg_support=Avg('support'),
-                total_reviews=Count('id')
-            )
-            
-            comparison_data.append({
-                'id': sacco.id,
-                'name': sacco.name,
-                'location': sacco.location,
-                'total_vehicles': vehicle_count,
-                'total_routes': routes.count(),
-                'avg_rating': float(ratings['avg_rating'] or 0),
-                'total_reviews': ratings['total_reviews'],
-                'avg_payment_punctuality': float(ratings['avg_payment_punctuality'] or 0),
-                'avg_rate_fairness': float(ratings['avg_rate_fairness'] or 0),
-                'avg_support': float(ratings['avg_support'] or 0),
-                'avg_earnings_per_vehicle': avg_earnings_per_vehicle,
-                'total_estimated_monthly_revenue': total_earnings,
-                'contact_info': {
-                    'phone': sacco.contact_number,
-                    'email': sacco.email,
-                    'website': sacco.website
+                # Get stats
+                total_vehicles = Vehicle.objects.filter(sacco=sacco).count()
+                routes = Route.objects.filter(sacco=sacco)
+                
+                # Get reviews
+                owner_reviews = OwnerReview.objects.filter(sacco=sacco)
+                avg_ratings = owner_reviews.aggregate(
+                    avg_payment_punctuality=Avg('payment_punctuality'),
+                    avg_driver_responsibility=Avg('driver_responsibility'),
+                    avg_rate_fairness=Avg('rate_fairness'),
+                    avg_support=Avg('support'),
+                    avg_transparency=Avg('transparency'),
+                    avg_overall=Avg('overall'),
+                    avg_total=Avg('average')
+                )
+                
+                sacco_data = {
+                    'id': sacco.id,
+                    'name': sacco.name,
+                    'location': sacco.location,
+                    'total_vehicles': total_vehicles,
+                    'total_routes': routes.count(),
+                    'established': sacco.date_established.strftime('%Y-%m-%d') if sacco.date_established else None,
+                    'ratings': {
+                        'average': float(avg_ratings['avg_total'] or 0),
+                        'payment_punctuality': float(avg_ratings['avg_payment_punctuality'] or 0),
+                        'driver_responsibility': float(avg_ratings['avg_driver_responsibility'] or 0),
+                        'rate_fairness': float(avg_ratings['avg_rate_fairness'] or 0),
+                        'support': float(avg_ratings['avg_support'] or 0),
+                        'transparency': float(avg_ratings['avg_transparency'] or 0),
+                        'overall': float(avg_ratings['avg_overall'] or 0),
+                        'total_reviews': owner_reviews.count()
+                    },
+                    'routes': [{
+                        'id': route.id,
+                        'name': str(route),
+                        'distance': float(route.distance),
+                        'fare': float(route.fare)
+                    } for route in routes][:5]  # Limit to 5 routes for comparison
                 }
-            })
+                
+                comparison_data.append(sacco_data)
+                
+            except Sacco.DoesNotExist:
+                return Response(
+                    {'error': f'Sacco with ID {sacco_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
         
         return Response({
             'comparison': comparison_data,
-            'comparison_summary': {
-                'highest_rated': max(comparison_data, key=lambda x: x['avg_rating'])['name'],
-                'most_vehicles': max(comparison_data, key=lambda x: x['total_vehicles'])['name'],
-                'best_earnings': max(comparison_data, key=lambda x: x['avg_earnings_per_vehicle'])['name'],
-                'most_routes': max(comparison_data, key=lambda x: x['total_routes'])['name']
-            }
+            'compared_at': timezone.now().isoformat()
         })
-class VehicleJoinRequestListView(generics.ListAPIView):
-    """
-    List all join requests for the authenticated user's vehicles
-    """
-    serializer_class = SaccoJoinRequestSerializer
-    permission_classes = [VehicleOwnerPermission]
-    
-    def get_queryset(self):
-        return SaccoJoinRequest.objects.filter(
-            owner=self.request.user
-        ).select_related('vehicle', 'sacco', 'processed_by').prefetch_related('preferred_routes')
 
 
-class VehicleJoinRequestDetailView(generics.RetrieveAPIView):
-    """
-    Get details of a specific join request
-    """
-    serializer_class = SaccoJoinRequestSerializer
-    permission_classes = [VehicleOwnerPermission]
-    
-    def get_queryset(self):
-        return SaccoJoinRequest.objects.filter(
-            owner=self.request.user
-        ).select_related('vehicle', 'sacco', 'processed_by').prefetch_related('preferred_routes')
-
-
+# Additional utility views for enhanced functionality
 class VehicleDocumentUploadView(APIView):
     """
     Upload documents for a vehicle
@@ -720,87 +754,629 @@ class VehicleDocumentUploadView(APIView):
         try:
             vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
             
-            serializer = VehicleDocumentSerializer(data=request.data)
-            if serializer.is_valid():
-                # Check if document type already exists for this vehicle
-                document_type = serializer.validated_data['document_type']
-                existing_doc = VehicleDocument.objects.filter(
-                    vehicle=vehicle,
-                    document_type=document_type
-                ).first()
+            document_type = request.data.get('document_type')
+            document_file = request.FILES.get('document')
+            
+            if not document_type or not document_file:
+                return Response(
+                    {'error': 'Both document_type and document file are required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check if document type is valid
+            valid_types = ['logbook', 'insurance', 'inspection', 'license', 'permit']
+            if document_type not in valid_types:
+                return Response(
+                    {'error': f'Invalid document type. Must be one of: {", ".join(valid_types)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check if document already exists for this vehicle and type
+            existing_doc = VehicleDocument.objects.filter(
+                vehicle=vehicle,
+                document_type=document_type
+            ).first()
+            
+            if existing_doc:
+                # Update existing document
+                existing_doc.document = document_file
+                existing_doc.expiry_date = request.data.get('expiry_date')
+                existing_doc.save()
                 
-                if existing_doc:
-                    # Update existing document
-                    serializer = VehicleDocumentSerializer(
-                        existing_doc, 
-                        data=request.data, 
-                        partial=True
-                    )
-                    if serializer.is_valid():
-                        serializer.save()
-                        return Response({
-                            'message': 'Document updated successfully',
-                            'document': serializer.data
-                        }, status=status.HTTP_200_OK)
-                else:
-                    # Create new document
-                    document = serializer.save(vehicle=vehicle)
+                serializer = VehicleDocumentSerializer(existing_doc)
+                return Response({
+                    'message': 'Document updated successfully',
+                    'document': serializer.data
+                }, status=status.HTTP_200_OK)
+            else:
+                # Create new document
+                document_data = {
+                    'document_type': document_type,
+                    'document': document_file,
+                    'expiry_date': request.data.get('expiry_date')
+                }
+                
+                serializer = VehicleDocumentSerializer(data=document_data)
+                if serializer.is_valid():
+                    serializer.save(vehicle=vehicle)
                     return Response({
                         'message': 'Document uploaded successfully',
                         'document': serializer.data
                     }, status=status.HTTP_201_CREATED)
-            
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-            
+                
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                
         except Exception as e:
             return Response(
-                {'error': str(e)}, 
+                {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
-class VehicleDocumentListView(generics.ListAPIView):
+class VehicleMaintenanceView(APIView):
     """
-    List all documents for a specific vehicle
-    """
-    serializer_class = VehicleDocumentSerializer
-    permission_classes = [VehicleOwnerPermission]
-    
-    def get_queryset(self):
-        vehicle_id = self.kwargs['vehicle_id']
-        vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=self.request.user)
-        return VehicleDocument.objects.filter(vehicle=vehicle)
-
-
-class VehicleDocumentStatusView(APIView):
-    """
-    Check document completion status for a vehicle
+    Track vehicle maintenance records
     """
     permission_classes = [VehicleOwnerPermission]
     
     def get(self, request, vehicle_id):
-        try:
-            vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
+        vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
+        
+        # This assumes you have a VehicleMaintenance model
+        # If not, you can create maintenance tracking through VehicleTrip or similar
+        maintenance_records = []
+        
+        return Response({
+            'vehicle_id': vehicle.id,
+            'maintenance_records': maintenance_records,
+            'next_service_due': None,  # Calculate based on mileage/time
+            'maintenance_alerts': []
+        })
+    
+    def post(self, request, vehicle_id):
+        vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
+        
+        # Add maintenance record logic here
+        maintenance_data = request.data
+        
+        return Response({
+            'message': 'Maintenance record added successfully',
+            'data': maintenance_data
+        }, status=status.HTTP_201_CREATED)
+
+
+class VehicleRevenueAnalyticsView(APIView):
+    """
+    Detailed revenue analytics for a vehicle
+    """
+    permission_classes = [VehicleOwnerPermission]
+    
+    def get(self, request, vehicle_id):
+        vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
+        
+        # Get date range from query params
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        
+        # Default to current month if no dates provided
+        if not start_date or not end_date:
+            current_date = timezone.now().date()
+            start_date = current_date.replace(day=1)
+            end_date = current_date
+        else:
+            from datetime import datetime
+            start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+        
+        # Get trips in date range
+        trips = VehicleTrip.objects.filter(
+            vehicle=vehicle,
+            date__gte=start_date,
+            date__lte=end_date
+        )
+        
+        # Calculate analytics
+        total_trips = trips.count()
+        total_revenue = sum(trip.revenue for trip in trips if trip.revenue)
+        total_distance = sum(trip.distance_covered for trip in trips if trip.distance_covered)
+        
+        # Group by date for trend analysis
+        daily_revenue = {}
+        for trip in trips:
+            date_str = trip.date.strftime('%Y-%m-%d')
+            if date_str not in daily_revenue:
+                daily_revenue[date_str] = {'trips': 0, 'revenue': 0, 'distance': 0}
             
-            required_docs = ['logbook', 'insurance', 'inspection', 'license', 'permit']
-            uploaded_docs = VehicleDocument.objects.filter(
-                vehicle=vehicle
-            ).values_list('document_type', flat=True)
-            
-            status_data = {
-                'vehicle_id': vehicle.id,
-                'vehicle_registration': vehicle.registration_number,
-                'required_documents': required_docs,
-                'uploaded_documents': list(uploaded_docs),
-                'missing_documents': [doc for doc in required_docs if doc not in uploaded_docs],
-                'is_complete': all(doc in uploaded_docs for doc in required_docs),
-                'completion_percentage': round((len(uploaded_docs) / len(required_docs)) * 100, 2)
+            daily_revenue[date_str]['trips'] += 1
+            daily_revenue[date_str]['revenue'] += float(trip.revenue or 0)
+            daily_revenue[date_str]['distance'] += float(trip.distance_covered or 0)
+        
+        # Convert to list format for frontend
+        daily_data = [
+            {
+                'date': date,
+                'trips': data['trips'],
+                'revenue': data['revenue'],
+                'distance': data['distance']
             }
+            for date, data in sorted(daily_revenue.items())
+        ]
+        
+        return Response({
+            'vehicle': VehicleSerializer(vehicle).data,
+            'period': {
+                'start_date': start_date.strftime('%Y-%m-%d'),
+                'end_date': end_date.strftime('%Y-%m-%d')
+            },
+            'summary': {
+                'total_trips': total_trips,
+                'total_revenue': float(total_revenue or 0),
+                'total_distance': float(total_distance or 0),
+                'average_revenue_per_trip': float(total_revenue / total_trips) if total_trips > 0 else 0,
+                'average_distance_per_trip': float(total_distance / total_trips) if total_trips > 0 else 0
+            },
+            'daily_breakdown': daily_data
+        })
+
+
+class VehicleComparisonView(APIView):
+    """
+    Compare performance between user's vehicles
+    """
+    permission_classes = [VehicleOwnerPermission]
+    
+    def get(self, request):
+        vehicles = Vehicle.objects.filter(owner=request.user)
+        
+        if vehicles.count() < 2:
+            return Response({
+                'message': 'You need at least 2 vehicles to compare performance',
+                'vehicles': VehicleSerializer(vehicles, many=True).data
+            })
+        
+        comparison_data = []
+        current_month = timezone.now().replace(day=1).date()
+        
+        for vehicle in vehicles:
+            # Get current month performance
+            performance = VehiclePerformance.objects.filter(
+                vehicle=vehicle,
+                month=current_month
+            ).first()
             
-            return Response(status_data, status=status.HTTP_200_OK)
-            
-        except Exception as e:
-            return Response(
-                {'error': str(e)}, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            # Get all-time stats
+            all_time_stats = VehiclePerformance.objects.filter(
+                vehicle=vehicle
+            ).aggregate(
+                total_trips=Sum('total_trips'),
+                total_revenue=Sum('total_revenue'),
+                avg_efficiency=Avg('fuel_efficiency')
             )
+            
+            vehicle_data = {
+                'vehicle': VehicleSerializer(vehicle).data,
+                'current_month': {
+                    'trips': performance.total_trips if performance else 0,
+                    'revenue': float(performance.total_revenue) if performance else 0,
+                    'profit': float(performance.net_profit) if performance else 0,
+                    'efficiency': float(performance.fuel_efficiency) if performance else 0
+                },
+                'all_time': {
+                    'total_trips': all_time_stats['total_trips'] or 0,
+                    'total_revenue': float(all_time_stats['total_revenue'] or 0),
+                    'avg_efficiency': float(all_time_stats['avg_efficiency'] or 0)
+                }
+            }
+            comparison_data.append(vehicle_data)
+        
+        # Sort by current month revenue
+        comparison_data.sort(
+            key=lambda x: x['current_month']['revenue'], 
+            reverse=True
+        )
+        
+        return Response({
+            'comparison': comparison_data,
+            'best_performer': comparison_data[0] if comparison_data else None,
+            'total_vehicles': len(comparison_data)
+        })
+
+
+class VehicleAlertView(APIView):
+    """
+    Get alerts and notifications for vehicles
+    """
+    permission_classes = [VehicleOwnerPermission]
+    
+    def get(self, request):
+        vehicles = Vehicle.objects.filter(owner=request.user)
+        alerts = []
+        
+        for vehicle in vehicles:
+            # Check document expiry
+            documents = VehicleDocument.objects.filter(vehicle=vehicle)
+            for doc in documents:
+                if doc.expiry_date:
+                    days_to_expiry = (doc.expiry_date - timezone.now().date()).days
+                    if days_to_expiry <= 30:  # Alert 30 days before expiry
+                        alerts.append({
+                            'type': 'document_expiry',
+                            'vehicle_id': vehicle.id,
+                            'vehicle_name': f"{vehicle.make} {vehicle.model}",
+                            'message': f"{doc.get_document_type_display()} expires in {days_to_expiry} days",
+                            'severity': 'high' if days_to_expiry <= 7 else 'medium',
+                            'date': doc.expiry_date.strftime('%Y-%m-%d')
+                        })
+            
+            # Check if vehicle is inactive
+            if not vehicle.is_active:
+                alerts.append({
+                    'type': 'inactive_vehicle',
+                    'vehicle_id': vehicle.id,
+                    'vehicle_name': f"{vehicle.make} {vehicle.model}",
+                    'message': 'Vehicle is marked as inactive',
+                    'severity': 'low'
+                })
+            
+            # Check for pending join requests
+            pending_requests = SaccoJoinRequest.objects.filter(
+                vehicle=vehicle,
+                status='pending'
+            ).count()
+            
+            if pending_requests > 0:
+                alerts.append({
+                    'type': 'pending_request',
+                    'vehicle_id': vehicle.id,
+                    'vehicle_name': f"{vehicle.make} {vehicle.model}",
+                    'message': f'{pending_requests} pending SACCO join request(s)',
+                    'severity': 'medium'
+                })
+        
+        # Sort alerts by severity
+        severity_order = {'high': 0, 'medium': 1, 'low': 2}
+        alerts.sort(key=lambda x: severity_order.get(x.get('severity', 'low'), 2))
+        
+        return Response({
+            'alerts': alerts,
+            'total_alerts': len(alerts),
+            'high_priority': len([a for a in alerts if a.get('severity') == 'high']),
+            'medium_priority': len([a for a in alerts if a.get('severity') == 'medium']),
+            'low_priority': len([a for a in alerts if a.get('severity') == 'low'])
+        })
+
+
+class VehicleExportDataView(APIView):
+    """
+    Export vehicle data for reporting
+    """
+    permission_classes = [VehicleOwnerPermission]
+    
+    def get(self, request):
+        from django.http import HttpResponse
+        import csv
+        
+        vehicle_id = request.query_params.get('vehicle_id')
+        export_type = request.query_params.get('type', 'trips')  # trips, performance, documents
+        
+        if vehicle_id:
+            vehicles = Vehicle.objects.filter(id=vehicle_id, owner=request.user)
+        else:
+            vehicles = Vehicle.objects.filter(owner=request.user)
+        
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="vehicle_{export_type}.csv"'
+        
+        writer = csv.writer(response)
+        
+        if export_type == 'trips':
+            writer.writerow(['Vehicle', 'Date', 'Route', 'Departure', 'Arrival', 'Distance', 'Revenue', 'Expenses'])
+            
+            for vehicle in vehicles:
+                trips = VehicleTrip.objects.filter(vehicle=vehicle).order_by('-date')
+                for trip in trips:
+                    writer.writerow([
+                        f"{vehicle.make} {vehicle.model}",
+                        trip.date.strftime('%Y-%m-%d'),
+                        trip.route.name if trip.route else 'N/A',
+                        trip.departure_time.strftime('%H:%M') if trip.departure_time else 'N/A',
+                        trip.arrival_time.strftime('%H:%M') if trip.arrival_time else 'N/A',
+                        trip.distance_covered or 0,
+                        trip.revenue or 0,
+                        trip.expenses or 0
+                    ])
+        
+        elif export_type == 'performance':
+            writer.writerow(['Vehicle', 'Month', 'Total Trips', 'Distance', 'Revenue', 'Profit', 'Efficiency'])
+            
+            for vehicle in vehicles:
+                performances = VehiclePerformance.objects.filter(vehicle=vehicle).order_by('-month')
+                for perf in performances:
+                    writer.writerow([
+                        f"{vehicle.make} {vehicle.model}",
+                        perf.month.strftime('%Y-%m'),
+                        perf.total_trips,
+                        perf.total_distance,
+                        perf.total_revenue,
+                        perf.net_profit,
+                        perf.fuel_efficiency
+                    ])
+        
+        return response
+# Fixed Views (vehicles/views.py)
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+from django.shortcuts import get_object_or_404
+from vehicles.models import SaccoJoinRequest, Vehicle
+from sacco.models import Sacco
+from vehicles.serializers import (
+    SaccoJoinRequestSerializer, 
+    ApproveRequestSerializer, 
+    RejectRequestSerializer,
+    SaccoAdminJoinRequestSerializer
+)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def approve_sacco_request(request, request_id):
+    """Approve a vehicle join request"""
+    try:
+        join_request = get_object_or_404(SaccoJoinRequest, id=request_id)
+        
+        # Check if request is still pending
+        if join_request.status != 'pending':
+            return Response({
+                'success': False,
+                'error': f'Request is already {join_request.status}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Add permission check - only sacco admins can approve
+        if not hasattr(request.user, 'sacco_admin') or request.user.sacco_admin.sacco != join_request.sacco:
+            return Response({
+                'success': False,
+                'error': 'You do not have permission to approve this request'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Validate the request data (optional additional data)
+        serializer = ApproveRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update the request status
+        join_request.status = 'approved'
+        join_request.processed_by = request.user
+        join_request.processed_at = timezone.now()
+        join_request.save()
+        
+        # Update the vehicle to be approved by sacco
+        vehicle = join_request.vehicle
+        vehicle.sacco = join_request.sacco
+        vehicle.is_approved_by_sacco = True
+        vehicle.date_joined_sacco = timezone.now()
+        vehicle.save()
+        
+        # TODO: Send notification to vehicle owner about approval
+        
+        return Response({
+            'success': True,
+            'message': 'Request approved successfully',
+            'data': SaccoJoinRequestSerializer(join_request).data
+        })
+        
+    except SaccoJoinRequest.DoesNotExist:
+        return Response({
+            'success': False,
+            'error': 'Request not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def reject_sacco_request(request, request_id):
+    """Reject a vehicle join request with reason"""
+    try:
+        # Fixed: Corrected the get_object_or_404 call
+        join_request = get_object_or_404(SaccoJoinRequest, id=request_id)
+        
+        # Check if request is still pending
+        if join_request.status != 'pending':
+            return Response({
+                'success': False,
+                'error': f'Request is already {join_request.status}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Add permission check - only sacco admins can reject
+        if not hasattr(request.user, 'sacco_admin') or request.user.sacco_admin.sacco != join_request.sacco:
+            return Response({
+                'success': False,
+                'error': 'You do not have permission to reject this request'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Validate the request data
+        serializer = RejectRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update the request status
+        join_request.status = 'rejected'
+        # join_request.rejection_reason = serializer.validated_data['reason']
+        join_request.processed_by = request.user
+        join_request.processed_at = timezone.now()
+        join_request.save()
+        
+        # TODO: Send notification to vehicle owner about rejection
+        # TODO: Log the rejection for audit purposes
+        
+        return Response({
+            'success': True,
+            'message': 'Request rejected successfully',
+            'data': SaccoJoinRequestSerializer(join_request).data
+        })
+        
+    except SaccoJoinRequest.DoesNotExist:
+        return Response({
+            'success': False,
+            'error': 'Request not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_pending_sacco_requests(request, sacco_id):
+    """Get all pending vehicle join requests for a specific sacco"""
+    try:
+        sacco = get_object_or_404(Sacco, id=sacco_id)
+        
+        # Debug logging
+        print(f"DEBUG: User: {request.user}")
+        print(f"DEBUG: User ID: {request.user.id}")
+        print(f"DEBUG: Sacco ID: {sacco.id}")
+        print(f"DEBUG: Has sacco_admin attr: {hasattr(request.user, 'sacco_admin')}")
+        
+        if hasattr(request.user, 'sacco_admin'):
+            print(f"DEBUG: User's sacco_admin: {request.user.sacco_admin}")
+            print(f"DEBUG: User's sacco: {request.user.sacco_admin.sacco}")
+            print(f"DEBUG: User's sacco ID: {request.user.sacco_admin.sacco.id}")
+            print(f"DEBUG: Requested sacco: {sacco}")
+            print(f"DEBUG: Sacco match: {request.user.sacco_admin.sacco == sacco}")
+        
+        # Add permission check - only sacco admins can view requests
+        if not hasattr(request.user, 'sacco_admin') or request.user.sacco_admin.sacco != sacco:
+            return Response({
+                'success': False,
+                'error': 'You do not have permission to view these requests'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        pending_requests = SaccoJoinRequest.objects.filter(
+            sacco=sacco,
+            status='pending'
+        ).select_related('vehicle', 'owner', 'sacco').order_by('-requested_at')
+        
+        # Use the detailed serializer for admin view
+        serializer = SaccoAdminJoinRequestSerializer(pending_requests, many=True)
+        
+        return Response({
+            'success': True,
+            'data': serializer.data,
+            'count': pending_requests.count()
+        })
+        
+    except Sacco.DoesNotExist:
+        return Response({
+            'success': False,
+            'error': 'Sacco not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        print(f"DEBUG: Exception: {str(e)}")
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_all_sacco_requests(request, sacco_id):
+    """Get all vehicle join requests for a specific sacco (pending, approved, rejected)"""
+    try:
+        sacco = get_object_or_404(Sacco, id=sacco_id)
+        
+        # Add permission check
+        if not hasattr(request.user, 'sacco_admin') or request.user.sacco_admin.sacco != sacco:
+            return Response({
+                'success': False,
+                'error': 'You do not have permission to view these requests'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get status filter from query params
+        status_filter = request.query_params.get('status', None)
+        
+        requests_query = SaccoJoinRequest.objects.filter(
+            sacco=sacco
+        ).select_related('vehicle', 'owner', 'sacco', 'processed_by')
+        
+        if status_filter:
+            requests_query = requests_query.filter(status=status_filter)
+        
+        requests_query = requests_query.order_by('-requested_at')
+        
+        serializer = SaccoAdminJoinRequestSerializer(requests_query, many=True)
+        
+        return Response({
+            'success': True,
+            'data': serializer.data,
+            'count': requests_query.count(),
+            'filters': {
+                'status': status_filter
+            }
+        })
+        
+    except Sacco.DoesNotExist:
+        return Response({
+            'success': False,
+            'error': 'Sacco not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# Additional view for getting request details
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_join_request_detail(request, request_id):
+    """Get detailed information about a specific join request"""
+    try:
+        join_request = get_object_or_404(SaccoJoinRequest, id=request_id)
+        
+        # Permission check - sacco admin or vehicle owner can view
+        is_sacco_admin = (hasattr(request.user, 'sacco_admin') and 
+                         request.user.sacco_admin.sacco == join_request.sacco)
+        is_vehicle_owner = request.user == join_request.owner
+        
+        if not (is_sacco_admin or is_vehicle_owner):
+            return Response({
+                'success': False,
+                'error': 'You do not have permission to view this request'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Use detailed serializer for admins, basic for owners
+        if is_sacco_admin:
+            serializer = SaccoAdminJoinRequestSerializer(join_request)
+        else:
+            serializer = SaccoJoinRequestSerializer(join_request)
+        
+        return Response({
+            'success': True,
+            'data': serializer.data
+        })
+        
+    except SaccoJoinRequest.DoesNotExist:
+        return Response({
+            'success': False,
+            'error': 'Request not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

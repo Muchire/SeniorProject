@@ -35,4 +35,4 @@ class SaccoAdminRequest(models.Model):
     reviewed = models.BooleanField(default=False)  # Track review status
 
     def __str__(self):
-        return f"{self.username} request for {self.sacco or self.sacco_name}"
+        return f"{self.user.username} request for {self.sacco or self.sacco_name}"

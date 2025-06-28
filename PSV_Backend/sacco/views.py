@@ -87,13 +87,37 @@ class ApproveSaccoAdminView(APIView):
                         "detail": f"Failed to create SACCO: {str(e)}"
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # Assign the user as admin of the SACCO
+            # Assign the user as admin of the SACCO (if you still need this field)
             try:
                 sacco.sacco_admin = req.user
                 sacco.save()
             except Exception as e:
                 return Response({
                     "detail": f"Failed to assign admin to SACCO: {str(e)}"
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # Create SaccoAdmin instance - THIS IS THE KEY ADDITION
+            try:
+                sacco_admin, created = SaccoAdmin.objects.get_or_create(
+                    user=req.user,
+                    sacco=sacco,
+                    defaults={
+                        'approved_by': request.user,  # The admin who approved this request
+                        'approved_at': timezone.now(),
+                        'is_active': True,
+                    }
+                )
+                
+                if not created:
+                    # If it already exists, just make sure it's active
+                    sacco_admin.is_active = True
+                    sacco_admin.approved_by = request.user
+                    sacco_admin.approved_at = timezone.now()
+                    sacco_admin.save()
+                    
+            except Exception as e:
+                return Response({
+                    "detail": f"Failed to create SaccoAdmin relationship: {str(e)}"
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             # Update user permissions
@@ -125,13 +149,16 @@ class ApproveSaccoAdminView(APIView):
             sacco.refresh_from_db()
             req.refresh_from_db()
             user.refresh_from_db()
+            sacco_admin.refresh_from_db()
 
             return Response({
                 "detail": "Sacco admin request approved successfully.",
                 "sacco_id": sacco.id,
                 "sacco_name": sacco.name,
                 "user_is_admin": user.is_sacco_admin,
-                "request_approved": req.is_approved
+                "request_approved": req.is_approved,
+                "sacco_admin_created": created,  # Let you know if it was newly created
+                "has_sacco_admin_attr": hasattr(user, 'sacco_admin')  # Debug info
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
