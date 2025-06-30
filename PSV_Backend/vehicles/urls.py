@@ -1,4 +1,4 @@
-# Complete PSV_Backend/vehicles/urls.py
+# Add this to your Django urls.py
 from django.urls import path
 from .views import (
     VehicleListCreateView, VehicleDetailView, VehicleDocumentView, VehicleDocumentDetailView,
@@ -8,7 +8,9 @@ from .views import (
     RouteListView, CreateOwnerReviewView, VehicleStatsView, SaccoSearchView,
     SaccoDashboardView, CompareSaccosView, VehicleDocumentUploadView,
     VehicleMaintenanceView, VehicleRevenueAnalyticsView, VehicleComparisonView,
-    VehicleAlertView, VehicleExportDataView,approve_sacco_request, reject_sacco_request,get_pending_sacco_requests,get_all_sacco_requests,get_join_request_detail
+    VehicleAlertView, VehicleExportDataView, approve_sacco_request, reject_sacco_request,
+    get_pending_sacco_requests, get_all_sacco_requests, get_join_request_detail,
+    get_vehicle_documents
 )
 
 app_name = 'vehicles'
@@ -27,6 +29,8 @@ urlpatterns = [
     path('<int:vehicle_id>/documents/<int:pk>/', VehicleDocumentDetailView.as_view(), name='vehicle-document-detail'),
     path('<int:vehicle_id>/documents/upload/', VehicleDocumentUploadView.as_view(), name='vehicle-document-upload'),
     
+    path('documents/<int:vehicle_id>/', get_vehicle_documents, name='get_vehicle_documents'),
+    
     # Vehicle Maintenance
     path('<int:vehicle_id>/maintenance/', VehicleMaintenanceView.as_view(), name='vehicle-maintenance'),
     
@@ -39,6 +43,7 @@ urlpatterns = [
     
     # SACCO Join Requests
     path('join-requests/', SaccoJoinRequestView.as_view(), name='join-requests'),
+    path('<int:sacco_id>/join-requests/pending/', get_pending_sacco_requests, name='sacco_pending_requests'),
     path('join-requests/<int:pk>/', SaccoJoinRequestDetailView.as_view(), name='join-request-detail'),
     path('sacco/<int:sacco_id>/join-requests/', get_all_sacco_requests, name='sacco_all_requests'),
     path('sacco/<int:sacco_id>/join-requests/pending/', get_pending_sacco_requests, name='sacco_pending_requests'),
@@ -46,9 +51,8 @@ urlpatterns = [
     # Individual request operations
     path('join-requests/<int:request_id>/', get_join_request_detail, name='join_request_detail'),
     path('join-requests/<int:request_id>/approve/', approve_sacco_request, name='approve_sacco_request'),
-    path('join-requests/<int:request_id>/reject/',reject_sacco_request, name='reject_sacco_request'),
+    path('join-requests/<int:request_id>/reject/', reject_sacco_request, name='reject_sacco_request'),
     
-
     # Trips and Performance
     path('<int:vehicle_id>/trips/', VehicleTripView.as_view(), name='vehicle-trips'),
     path('<int:vehicle_id>/performance/', VehiclePerformanceView.as_view(), name='vehicle-performance'),

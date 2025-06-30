@@ -1,7 +1,7 @@
 from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from django.db.models import Q, Count, Avg, Sum
@@ -10,13 +10,17 @@ from django.db import transaction
 from .serializers import (
     EnhancedSaccoDashboardSerializer, VehicleSerializer, VehicleDocumentSerializer, SaccoJoinRequestSerializer,
     VehicleTripSerializer, VehiclePerformanceSerializer,
-    VehicleOwnerDashboardSerializer, VehicleOwnerReviewsSerializer,RejectRequestSerializer,ApproveRequestSerializer
+    VehicleOwnerDashboardSerializer, VehicleOwnerReviewsSerializer,RejectRequestSerializer,ApproveRequestSerializer, SaccoAdminJoinRequestSerializer
 )
 from reviews.serializers import OwnerReviewSerializer
 from routes.models import Route
 from sacco.models import Sacco
 from reviews.models import OwnerReview
 from .models import Vehicle, VehicleDocument, SaccoJoinRequest, VehicleTrip, VehiclePerformance
+from vehicles.email_service import SaccoEmailService
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class VehicleOwnerPermission(permissions.BasePermission):
@@ -32,14 +36,22 @@ class VehicleOwnerPermission(permissions.BasePermission):
 
 class VehicleListCreateView(generics.ListCreateAPIView):
     serializer_class = VehicleSerializer
-    permission_classes = [VehicleOwnerPermission]
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         return Vehicle.objects.filter(owner=self.request.user).order_by('-created_at')
     
     def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
-
+        # Save the vehicle with the current user as owner
+        vehicle = serializer.save(owner=self.request.user)
+        
+        # Update user to be a vehicle owner if they aren't already
+        user = self.request.user
+        if not user.is_vehicle_owner:
+            user.is_vehicle_owner = True
+            user.save(update_fields=['is_vehicle_owner'])
+        
+        return vehicle
 
 class VehicleDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = VehicleSerializer
@@ -112,107 +124,6 @@ class VehicleEarningsEstimationView(APIView):
             'vehicle': VehicleSerializer(vehicle).data,
             'earnings_estimations': earnings_data
         })
-
-
-class SaccoJoinRequestView(generics.ListCreateAPIView):
-    """
-    List all join requests for the authenticated user or create a new one
-    """
-    serializer_class = SaccoJoinRequestSerializer
-    permission_classes = [VehicleOwnerPermission]
-    
-    def get_queryset(self):
-        return SaccoJoinRequest.objects.filter(
-            owner=self.request.user
-        ).select_related('vehicle', 'sacco', 'processed_by').prefetch_related('preferred_routes')
-    
-    def create(self, request, *args, **kwargs):
-        try:
-            # Get sacco_id and vehicle_id from request data
-            sacco_id = request.data.get('sacco_id')
-            vehicle_id = request.data.get('vehicle_id')
-            
-            if not sacco_id or not vehicle_id:
-                return Response(
-                    {'error': 'Both sacco_id and vehicle_id are required'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Get the sacco and vehicle
-            sacco = get_object_or_404(Sacco, id=sacco_id)
-            vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
-            
-            # Check if vehicle already belongs to a sacco
-            if vehicle.sacco:
-                return Response(
-                    {'error': 'Vehicle is already part of a sacco'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Check if there's already a pending request
-            existing_request = SaccoJoinRequest.objects.filter(
-                vehicle=vehicle, 
-                sacco=sacco,
-                status__in=['pending', 'under_review']
-            ).first()
-            
-            if existing_request:
-                return Response(
-                    {'error': 'There is already a pending join request for this vehicle to this sacco'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Check if vehicle has required documents
-            required_docs = ['logbook', 'insurance', 'inspection', 'license', 'permit']
-            missing_docs = []
-            
-            for doc_type in required_docs:
-                if not VehicleDocument.objects.filter(
-                    vehicle=vehicle, 
-                    document_type=doc_type
-                ).exists():
-                    missing_docs.append(doc_type)
-            
-            if missing_docs:
-                return Response({
-                    'error': 'Missing required documents',
-                    'missing_documents': missing_docs,
-                    'message': 'Please upload all required documents before submitting a join request'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Create the join request
-            serializer = self.get_serializer(data=request.data)
-            if serializer.is_valid():
-                with transaction.atomic():
-                    join_request = serializer.save(
-                        vehicle=vehicle,
-                        sacco=sacco,
-                        owner=request.user
-                    )
-                
-                return Response({
-                    'message': 'Join request submitted successfully',
-                    'request_id': join_request.id,
-                    'status': join_request.status,
-                    'data': serializer.data
-                }, status=status.HTTP_201_CREATED)
-            
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-            
-        except Exception as e:
-            return Response(
-                {'error': str(e)}, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-class SaccoJoinRequestDetailView(generics.RetrieveAPIView):
-    serializer_class = SaccoJoinRequestSerializer
-    
-    def get_queryset(self):
-        return SaccoJoinRequest.objects.filter(
-            owner=self.request.user
-        ).select_related('vehicle', 'sacco', 'processed_by').prefetch_related('preferred_routes')
 
 
 class VehicleTripView(generics.ListCreateAPIView):
@@ -743,11 +654,7 @@ class CompareSaccosView(APIView):
         })
 
 
-# Additional utility views for enhanced functionality
 class VehicleDocumentUploadView(APIView):
-    """
-    Upload documents for a vehicle
-    """
     permission_classes = [VehicleOwnerPermission]
     
     def post(self, request, vehicle_id):
@@ -755,16 +662,17 @@ class VehicleDocumentUploadView(APIView):
             vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
             
             document_type = request.data.get('document_type')
-            document_file = request.FILES.get('document')
+            document_file = request.FILES.get('document_file')  # Changed from 'document'
+            document_name = request.data.get('document_name', '')
             
             if not document_type or not document_file:
                 return Response(
-                    {'error': 'Both document_type and document file are required'},
+                    {'error': 'Both document_type and document_file are required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
             # Check if document type is valid
-            valid_types = ['logbook', 'insurance', 'inspection', 'license', 'permit']
+            valid_types = [choice[0] for choice in VehicleDocument.DOCUMENT_TYPES]
             if document_type not in valid_types:
                 return Response(
                     {'error': f'Invalid document type. Must be one of: {", ".join(valid_types)}'},
@@ -779,7 +687,8 @@ class VehicleDocumentUploadView(APIView):
             
             if existing_doc:
                 # Update existing document
-                existing_doc.document = document_file
+                existing_doc.document_file = document_file
+                existing_doc.document_name = document_name
                 existing_doc.expiry_date = request.data.get('expiry_date')
                 existing_doc.save()
                 
@@ -792,7 +701,8 @@ class VehicleDocumentUploadView(APIView):
                 # Create new document
                 document_data = {
                     'document_type': document_type,
-                    'document': document_file,
+                    'document_file': document_file,
+                    'document_name': document_name,
                     'expiry_date': request.data.get('expiry_date')
                 }
                 
@@ -811,8 +721,6 @@ class VehicleDocumentUploadView(APIView):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-
 class VehicleMaintenanceView(APIView):
     """
     Track vehicle maintenance records
@@ -1103,20 +1011,134 @@ class VehicleExportDataView(APIView):
                     ])
         
         return response
-# Fixed Views (vehicles/views.py)
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework import status
-from django.shortcuts import get_object_or_404
-from vehicles.models import SaccoJoinRequest, Vehicle
-from sacco.models import Sacco
-from vehicles.serializers import (
-    SaccoJoinRequestSerializer, 
-    ApproveRequestSerializer, 
-    RejectRequestSerializer,
-    SaccoAdminJoinRequestSerializer
-)
+class SaccoJoinRequestView(generics.ListCreateAPIView):
+    """
+    List all join requests for the authenticated user or create a new one
+    """
+    serializer_class = SaccoJoinRequestSerializer
+    permission_classes = [VehicleOwnerPermission]
+    
+    def get_queryset(self):
+        return SaccoJoinRequest.objects.filter(
+            owner=self.request.user
+        ).select_related('vehicle', 'sacco', 'processed_by').prefetch_related('preferred_routes')
+    
+    def create(self, request, *args, **kwargs):
+        try:
+            # Get sacco_id and vehicle_id from request data
+            sacco_id = request.data.get('sacco_id')
+            vehicle_id = request.data.get('vehicle_id')
+            
+            if not sacco_id or not vehicle_id:
+                return Response(
+                    {'error': 'Both sacco_id and vehicle_id are required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get the sacco and vehicle
+            sacco = get_object_or_404(Sacco, id=sacco_id)
+            vehicle = get_object_or_404(Vehicle, id=vehicle_id, owner=request.user)
+            
+            # Check if vehicle already belongs to a sacco
+            if vehicle.sacco:
+                return Response(
+                    {'error': 'Vehicle is already part of a sacco'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check if there's already a pending request
+            existing_request = SaccoJoinRequest.objects.filter(
+                vehicle=vehicle,
+                sacco=sacco,
+                status__in=['pending', 'under_review']
+            ).first()
+            
+            if existing_request:
+                return Response(
+                    {'error': 'There is already a pending join request for this vehicle to this sacco'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check if vehicle has required documents
+            required_docs = ['logbook', 'insurance', 'inspection', 'license', 'permit']
+            missing_docs = []
+            
+            for doc_type in required_docs:
+                if not VehicleDocument.objects.filter(
+                    vehicle=vehicle,
+                    document_type=doc_type
+                ).exists():
+                    missing_docs.append(doc_type)
+            
+            if missing_docs:
+                return Response({
+                    'error': 'Missing required documents',
+                    'missing_documents': missing_docs,
+                    'message': 'Please upload all required documents before submitting a join request'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Create the join request
+            serializer = self.get_serializer(data=request.data)
+            if serializer.is_valid():
+                with transaction.atomic():
+                    join_request = serializer.save(
+                        vehicle=vehicle,
+                        sacco=sacco,
+                        owner=request.user
+                    )
+                    
+                    # Send confirmation email to vehicle owner
+                    logger.info(f"Sending confirmation email to owner: {request.user.email}")
+                    email_sent_to_owner = SaccoEmailService.send_join_request_confirmation(join_request)
+                    
+                    # Send notification email to sacco admins
+                    logger.info(f"Sending notification email to sacco admins for: {sacco.name}")
+                    email_sent_to_admin = SaccoEmailService.send_admin_new_request_notification(join_request)
+                    
+                    response_data = {
+                        'success': True,
+                        'message': 'Join request submitted successfully',
+                        'request_id': join_request.id,
+                        'status': join_request.status,
+                        'data': serializer.data,
+                        'email_notifications': {
+                            'owner_notified': email_sent_to_owner,
+                            'admin_notified': email_sent_to_admin
+                        }
+                    }
+                    
+                    # Add warnings for failed emails
+                    if not email_sent_to_owner:
+                        response_data['email_notifications']['owner_warning'] = 'Failed to send confirmation email to owner'
+                        logger.warning(f"Failed to send confirmation email to {request.user.email}")
+                    
+                    if not email_sent_to_admin:
+                        response_data['email_notifications']['admin_warning'] = 'Failed to send notification email to sacco admin'
+                        logger.warning(f"Failed to send admin notification for sacco {sacco.name}")
+                    
+                    return Response(response_data, status=status.HTTP_201_CREATED)
+            
+            return Response({
+                'success': False,
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        except Exception as e:
+            logger.error(f"Error creating join request: {str(e)}")
+            return Response({
+                'success': False,
+                'error': 'An error occurred while processing your request. Please try again.'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class SaccoJoinRequestDetailView(generics.RetrieveAPIView):
+    serializer_class = SaccoJoinRequestSerializer
+    
+    def get_queryset(self):
+        return SaccoJoinRequest.objects.filter(
+            owner=self.request.user
+        ).select_related('vehicle', 'sacco', 'processed_by').prefetch_related('preferred_routes')
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -1132,13 +1154,6 @@ def approve_sacco_request(request, request_id):
                 'error': f'Request is already {join_request.status}'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Add permission check - only sacco admins can approve
-        if not hasattr(request.user, 'sacco_admin') or request.user.sacco_admin.sacco != join_request.sacco:
-            return Response({
-                'success': False,
-                'error': 'You do not have permission to approve this request'
-            }, status=status.HTTP_403_FORBIDDEN)
-        
         # Validate the request data (optional additional data)
         serializer = ApproveRequestSerializer(data=request.data)
         if not serializer.is_valid():
@@ -1148,25 +1163,36 @@ def approve_sacco_request(request, request_id):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Update the request status
-        join_request.status = 'approved'
-        join_request.processed_by = request.user
-        join_request.processed_at = timezone.now()
-        join_request.save()
+        with transaction.atomic():
+            join_request.status = 'approved'
+            join_request.processed_by = request.user
+            join_request.processed_at = timezone.now()
+            join_request.admin_notes = serializer.validated_data.get('admin_notes', '')
+            join_request.save()
+            
+            # Update the vehicle to be approved by sacco
+            vehicle = join_request.vehicle
+            vehicle.sacco = join_request.sacco
+            vehicle.is_approved_by_sacco = True
+            vehicle.date_joined_sacco = timezone.now()
+            vehicle.save()
+            
+            # Send approval notification email
+            logger.info(f"Sending approval email to: {join_request.owner.email}")
+            email_sent = SaccoEmailService.send_approval_notification(join_request)
         
-        # Update the vehicle to be approved by sacco
-        vehicle = join_request.vehicle
-        vehicle.sacco = join_request.sacco
-        vehicle.is_approved_by_sacco = True
-        vehicle.date_joined_sacco = timezone.now()
-        vehicle.save()
-        
-        # TODO: Send notification to vehicle owner about approval
-        
-        return Response({
+        response_data = {
             'success': True,
             'message': 'Request approved successfully',
-            'data': SaccoJoinRequestSerializer(join_request).data
-        })
+            'data': SaccoJoinRequestSerializer(join_request).data,
+            'email_sent': email_sent
+        }
+        
+        if not email_sent:
+            response_data['email_warning'] = 'Request approved but failed to send notification email'
+            logger.warning(f"Failed to send approval email to {join_request.owner.email}")
+        
+        return Response(response_data)
         
     except SaccoJoinRequest.DoesNotExist:
         return Response({
@@ -1174,9 +1200,10 @@ def approve_sacco_request(request, request_id):
             'error': 'Request not found'
         }, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
+        logger.error(f"Error approving request: {str(e)}")
         return Response({
             'success': False,
-            'error': str(e)
+            'error': 'An error occurred while processing the approval'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -1185,7 +1212,6 @@ def approve_sacco_request(request, request_id):
 def reject_sacco_request(request, request_id):
     """Reject a vehicle join request with reason"""
     try:
-        # Fixed: Corrected the get_object_or_404 call
         join_request = get_object_or_404(SaccoJoinRequest, id=request_id)
         
         # Check if request is still pending
@@ -1195,36 +1221,52 @@ def reject_sacco_request(request, request_id):
                 'error': f'Request is already {join_request.status}'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Add permission check - only sacco admins can reject
-        if not hasattr(request.user, 'sacco_admin') or request.user.sacco_admin.sacco != join_request.sacco:
-            return Response({
-                'success': False,
-                'error': 'You do not have permission to reject this request'
-            }, status=status.HTTP_403_FORBIDDEN)
+        # Get rejection reason from either field name for flexibility
+        rejection_reason = (
+            request.data.get('rejection_reason') or 
+            request.data.get('reason') or 
+            ''
+        ).strip()
         
-        # Validate the request data
-        serializer = RejectRequestSerializer(data=request.data)
-        if not serializer.is_valid():
+        if not rejection_reason:
             return Response({
                 'success': False,
-                'errors': serializer.errors
+                'error': 'Rejection reason is required',
+                'message': 'Please provide either "rejection_reason" or "reason" field'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        admin_notes = request.data.get('admin_notes', '')
+        
         # Update the request status
-        join_request.status = 'rejected'
-        # join_request.rejection_reason = serializer.validated_data['reason']
-        join_request.processed_by = request.user
-        join_request.processed_at = timezone.now()
-        join_request.save()
+        with transaction.atomic():
+            join_request.status = 'rejected'
+            join_request.processed_by = request.user
+            join_request.processed_at = timezone.now()
+            join_request.rejection_reason = rejection_reason
+            join_request.admin_notes = admin_notes
+            join_request.save()
+            
+            # Send rejection notification email
+            try:
+                email_sent = SaccoEmailService.send_rejection_notification(
+                    join_request, 
+                    join_request.rejection_reason
+                )
+            except Exception as email_error:
+                logger.error(f"Email service error: {str(email_error)}")
+                email_sent = False
         
-        # TODO: Send notification to vehicle owner about rejection
-        # TODO: Log the rejection for audit purposes
-        
-        return Response({
+        response_data = {
             'success': True,
             'message': 'Request rejected successfully',
-            'data': SaccoJoinRequestSerializer(join_request).data
-        })
+            'data': SaccoJoinRequestSerializer(join_request).data,
+            'email_sent': email_sent
+        }
+        
+        if not email_sent:
+            response_data['email_warning'] = 'Request rejected but failed to send notification email'
+        
+        return Response(response_data)
         
     except SaccoJoinRequest.DoesNotExist:
         return Response({
@@ -1232,63 +1274,10 @@ def reject_sacco_request(request, request_id):
             'error': 'Request not found'
         }, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
+        logger.error(f"Error rejecting request: {str(e)}")
         return Response({
             'success': False,
-            'error': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def get_pending_sacco_requests(request, sacco_id):
-    """Get all pending vehicle join requests for a specific sacco"""
-    try:
-        sacco = get_object_or_404(Sacco, id=sacco_id)
-        
-        # Debug logging
-        print(f"DEBUG: User: {request.user}")
-        print(f"DEBUG: User ID: {request.user.id}")
-        print(f"DEBUG: Sacco ID: {sacco.id}")
-        print(f"DEBUG: Has sacco_admin attr: {hasattr(request.user, 'sacco_admin')}")
-        
-        if hasattr(request.user, 'sacco_admin'):
-            print(f"DEBUG: User's sacco_admin: {request.user.sacco_admin}")
-            print(f"DEBUG: User's sacco: {request.user.sacco_admin.sacco}")
-            print(f"DEBUG: User's sacco ID: {request.user.sacco_admin.sacco.id}")
-            print(f"DEBUG: Requested sacco: {sacco}")
-            print(f"DEBUG: Sacco match: {request.user.sacco_admin.sacco == sacco}")
-        
-        # Add permission check - only sacco admins can view requests
-        if not hasattr(request.user, 'sacco_admin') or request.user.sacco_admin.sacco != sacco:
-            return Response({
-                'success': False,
-                'error': 'You do not have permission to view these requests'
-            }, status=status.HTTP_403_FORBIDDEN)
-        
-        pending_requests = SaccoJoinRequest.objects.filter(
-            sacco=sacco,
-            status='pending'
-        ).select_related('vehicle', 'owner', 'sacco').order_by('-requested_at')
-        
-        # Use the detailed serializer for admin view
-        serializer = SaccoAdminJoinRequestSerializer(pending_requests, many=True)
-        
-        return Response({
-            'success': True,
-            'data': serializer.data,
-            'count': pending_requests.count()
-        })
-        
-    except Sacco.DoesNotExist:
-        return Response({
-            'success': False,
-            'error': 'Sacco not found'
-        }, status=status.HTTP_404_NOT_FOUND)
-    except Exception as e:
-        print(f"DEBUG: Exception: {str(e)}")
-        return Response({
-            'success': False,
-            'error': str(e)
+            'error': 'An error occurred while processing the rejection'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
@@ -1297,13 +1286,6 @@ def get_all_sacco_requests(request, sacco_id):
     """Get all vehicle join requests for a specific sacco (pending, approved, rejected)"""
     try:
         sacco = get_object_or_404(Sacco, id=sacco_id)
-        
-        # Add permission check
-        if not hasattr(request.user, 'sacco_admin') or request.user.sacco_admin.sacco != sacco:
-            return Response({
-                'success': False,
-                'error': 'You do not have permission to view these requests'
-            }, status=status.HTTP_403_FORBIDDEN)
         
         # Get status filter from query params
         status_filter = request.query_params.get('status', None)
@@ -1340,30 +1322,58 @@ def get_all_sacco_requests(request, sacco_id):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-# Additional view for getting request details
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_pending_sacco_requests(request, sacco_id):
+    """Get all pending vehicle join requests for a specific sacco"""
+    try:
+        sacco = get_object_or_404(Sacco, id=sacco_id)
+        
+        pending_requests = SaccoJoinRequest.objects.filter(
+            sacco=sacco,
+            status='pending'
+        ).select_related(
+            'vehicle', 'owner', 'sacco'
+        ).prefetch_related(
+            'vehicle__documents',  # Prefetch vehicle documents
+            'preferred_routes'
+        ).order_by('-requested_at')
+        
+        serializer = SaccoAdminJoinRequestSerializer(pending_requests, many=True)
+        
+        return Response({
+            'success': True,
+            'data': serializer.data,
+            'count': pending_requests.count()
+        })
+        
+    except Sacco.DoesNotExist:
+        return Response({
+            'success': False,
+            'error': 'Sacco not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_join_request_detail(request, request_id):
     """Get detailed information about a specific join request"""
     try:
-        join_request = get_object_or_404(SaccoJoinRequest, id=request_id)
+        join_request = get_object_or_404(
+            SaccoJoinRequest.objects.select_related(
+                'vehicle', 'owner', 'sacco', 'processed_by'
+            ).prefetch_related(
+                'vehicle__documents',  # Prefetch vehicle documents
+                'preferred_routes'
+            ),
+            id=request_id
+        )
         
-        # Permission check - sacco admin or vehicle owner can view
-        is_sacco_admin = (hasattr(request.user, 'sacco_admin') and 
-                         request.user.sacco_admin.sacco == join_request.sacco)
-        is_vehicle_owner = request.user == join_request.owner
-        
-        if not (is_sacco_admin or is_vehicle_owner):
-            return Response({
-                'success': False,
-                'error': 'You do not have permission to view this request'
-            }, status=status.HTTP_403_FORBIDDEN)
-        
-        # Use detailed serializer for admins, basic for owners
-        if is_sacco_admin:
-            serializer = SaccoAdminJoinRequestSerializer(join_request)
-        else:
-            serializer = SaccoJoinRequestSerializer(join_request)
+        serializer = SaccoAdminJoinRequestSerializer(join_request)
         
         return Response({
             'success': True,
@@ -1380,3 +1390,34 @@ def get_join_request_detail(request, request_id):
             'success': False,
             'error': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_vehicle_documents(request, vehicle_id):
+    try:
+        # Verify the vehicle belongs to the user or they have permission to view it
+        vehicle = get_object_or_404(Vehicle, id=vehicle_id)
+        
+        # Add permission check if needed
+        if vehicle.owner != request.user:
+            return Response({'error': 'Permission denied'}, status=403)
+        
+        documents = vehicle.documents.all()
+        
+        documents_data = []
+        for doc in documents:
+            documents_data.append({
+                'id': doc.id,
+                'document_type': doc.document_type,
+                'document_type_display': doc.get_document_type_display(),
+                'document_name': doc.document_name,
+                'document_url': doc.document_file.url if doc.document_file else None,
+                'is_verified': doc.is_verified,
+                'expiry_date': doc.expiry_date.isoformat() if doc.expiry_date else None,
+                'is_expired': doc.is_expired,
+                'days_until_expiry': doc.days_until_expiry,
+            })
+        
+        return Response({'documents': documents_data})
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)

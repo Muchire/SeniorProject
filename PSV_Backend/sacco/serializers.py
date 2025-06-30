@@ -1,15 +1,35 @@
 from rest_framework import serializers
 from sacco.models import Sacco, SaccoAdminRequest
+from routes.serializers import RouteSerializer
 
 
 class SaccoSerializer(serializers.ModelSerializer):
+    sacco_admin = serializers.StringRelatedField()
+    routes = RouteSerializer(many=True, read_only=True)
+    commission_structure = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Sacco
+        fields = '__all__'  # or list specific fields including new ones
+    
+    def get_commission_structure(self, obj):
+        return {
+            'rate': obj.commission_rate,
+            'daily_target': obj.daily_target,
+            'weekly_bonus_threshold': obj.weekly_bonus_threshold,
+            'weekly_bonus_amount': obj.weekly_bonus_amount,
+        }
+
+# serializers.py
+class SaccoPOVSerializer(serializers.ModelSerializer):
     sacco_admin = serializers.StringRelatedField()  # Assuming user is a ForeignKey to User model
     class Meta:
         model= Sacco
-        fields = '__all__'
+        fields = [
+            "id", "name", "location", "date_established",
+            "registration_number", "contact_number", "email","sacco_admin"]
 
-    
-# serializers.py
+  
 
 class SaccoAdminRequestSerializer(serializers.ModelSerializer):
     sacco = SaccoSerializer(read_only=True)  # Return full Sacco details

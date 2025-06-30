@@ -2,7 +2,7 @@
 from rest_framework import serializers
 from sacco.models import Sacco
 from routes.models import Route, RouteStop
-from reviews.models import PassengerReview, OwnerReview
+from reviews.models import PassengerReview, OwnerReview, SaccoJoinRequest
 
 
 class SaccoAdminSerializer(serializers.ModelSerializer):
@@ -162,3 +162,80 @@ class DashboardStatsSerializer(serializers.Serializer):
     
     def to_representation(self, instance):
         return instance
+class SaccoAdminJoinRequestSerializer(serializers.ModelSerializer):
+    """Serializer for sacco join requests"""
+    user_name = serializers.CharField(source='user.username', read_only=True)
+    user_email = serializers.CharField(source='user.email', read_only=True)
+    sacco_name = serializers.CharField(source='sacco.name', read_only=True)
+    
+    class Meta:
+        model = SaccoJoinRequest
+        fields = [
+            'id', 'user', 'user_name', 'user_email', 'sacco', 'sacco_name',
+            'status', 'requested_at', 'processed_at', 'processed_by',
+            'admin_notes'
+        ]
+        read_only_fields = ['user', 'sacco', 'requested_at']
+    
+    def create(self, validated_data):
+        # Automatically set the status to 'pending' on creation
+        validated_data['status'] = 'pending'
+        return super().create(validated_data)
+    
+    def update(self, instance, validated_data):
+        # Allow updating status and admin notes
+        instance.status = validated_data.get('status', instance.status)
+        instance.admin_notes = validated_data.get('admin_notes', instance.admin_notes)
+        instance.processed_by = validated_data.get('processed_by', instance.processed_by)
+        instance.processed_at = validated_data.get('processed_at', instance.processed_at)
+        instance.save()
+        return instance
+
+    def validate(self, data):
+        # Ensure that a user can only have one pending request per sacco
+        if data.get('status') == 'pending':
+            existing_request = SaccoJoinRequest.objects.filter(
+                user=data['user'], sacco=data['sacco'], status='pending'
+            ).exists()
+            if existing_request:
+                raise serializers.ValidationError("You already have a pending request for this SACCO.")
+        return data
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        representation['requested_at'] = instance.requested_at.strftime('%Y-%m-%d %H:%M:%S')
+        if instance.processed_at:
+            representation['processed_at'] = instance.processed_at.strftime('%Y-%m-%d %H:%M:%S')
+        return representation
+
+    def get_user_name(self, obj):
+        return obj.user.username if obj.user else None
+
+    def get_user_email(self, obj):
+        return obj.user.email if obj.user else None
+
+    def get_sacco_name(self, obj):
+        return obj.sacco.name if obj.sacco else None
+
+    def get_status_display(self, obj):
+        return dict(SaccoJoinRequest.STATUS_CHOICES).get(obj.status, obj.status)
+    
+    def get_processed_by_name(self, obj):
+        return obj.processed_by.username if obj.processed_by else None
+
+    def get_processed_by_email(self, obj):
+        return obj.processed_by.email if obj.processed_by else None
+
+    def get_requested_at_formatted(self, obj):
+        return obj.requested_at.strftime('%Y-%m-%d %H:%M:%S')
+
+    def get_processed_at_formatted(self, obj):
+        if obj.processed_at:
+            return obj.processed_at.strftime('%Y-%m-%d %H:%M:%S')
+        return None
+
+    def get_admin_notes(self, obj):
+        return obj.admin_notes if obj.admin_notes else "No notes provided"
+    
+    def get_status(self, obj):
+        return self.get_status_display(obj) 

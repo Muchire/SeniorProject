@@ -4,6 +4,7 @@ from django.conf import settings
 from decimal import Decimal
 from sacco.models import Sacco
 from routes.models import Route
+from django.utils import timezone
 
 class Vehicle(models.Model):
     VEHICLE_TYPES = [
@@ -157,13 +158,14 @@ class SaccoJoinRequest(models.Model):
     )
     admin_notes = models.TextField(blank=True, help_text="Notes from sacco admin")
     
+    rejection_reason = models.TextField(blank=True, help_text="Reason for rejection")
+    
     class Meta:
         unique_together = ('vehicle', 'sacco')
         ordering = ['-requested_at']
     
     def __str__(self):
         return f"{self.vehicle.registration_number} -> {self.sacco.name} ({self.status})"
-
 
 class VehicleTrip(models.Model):
     """Track actual trips taken by vehicles"""

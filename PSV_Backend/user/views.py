@@ -25,10 +25,9 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.core.mail import send_mail
 from django.shortcuts import redirect
+from vehicles.email_service import SaccoEmailService
 from django.urls import reverse
 from django.contrib.auth import logout
-
-# Add these imports for Google OAuth
 try:
     from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
     from allauth.socialaccount.providers.oauth2.client import OAuth2Client
@@ -46,14 +45,26 @@ class RegisterView(APIView):
         serializer = RegisterSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
-            token, created = Token.objects.get_or_create(user=user) 
+            token, created = Token.objects.get_or_create(user=user)
+            
+            # Send welcome email
+            try:
+                email_sent = SaccoEmailService.send_welcome_email(user)
+                if email_sent:
+                    logger.info(f"Welcome email sent successfully to {user.email}")
+                else:
+                    logger.warning(f"Failed to send welcome email to {user.email}")
+            except Exception as e:
+                # Log the error but don't fail the registration
+                logger.error(f"Error sending welcome email to {user.email}: {str(e)}")
+            
             return Response({
                 "message": "User registered successfully.",
                 "token": token.key,
                 "user": UserSerializer(user).data
             }, status=status.HTTP_201_CREATED)
+        
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
 
 class LoginView(APIView):
     def post(self, request):
@@ -457,8 +468,6 @@ def request_password_reset(request):
         token = default_token_generator.make_token(user)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         
-        # Create reset link (you can customize this URL)
-        reset_link = f"{settings.FRONTEND_URL}/reset-password?token={token}&uid={uid}"
         
         # Send email
         subject = 'PSV Finder - Password Reset Request'
@@ -469,8 +478,6 @@ def request_password_reset(request):
         
         Reset Token: {token}
         User ID: {uid}
-        
-        Or click this link: {reset_link}
         
         If you didn't request this reset, please ignore this email.
         
