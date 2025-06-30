@@ -37,7 +37,7 @@ class OwnerReview(models.Model):
     rate_fairness = models.PositiveIntegerField(choices=[(i, i) for i in range(1, 11)], help_text="How fair are the charges?")
     support = models.PositiveIntegerField(choices=[(i, i) for i in range(1, 11)], help_text="How responsive is the sacco management?")
     transparency = models.PositiveIntegerField(choices=[(i, i) for i in range(1, 11)], help_text="How transparent is sacco decision-making?")
-    overall = models.PositiveIntegerField(choices=[(i, i) for i in range(1, 6)], help_text="Overall rating out of 5")
+    overall = models.PositiveIntegerField(choices=[(i, i) for i in range(1, 11)], help_text="Overall rating out of 5")
 
     average = models.DecimalField(max_digits=4, decimal_places=2, default=1.0)
     comment = models.TextField(blank=True, null=True)
