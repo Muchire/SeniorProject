@@ -12,16 +12,76 @@ from django.db.models import Count, Avg, Sum
 class VehicleDocumentSerializer(serializers.ModelSerializer):
     vehicle_registration = serializers.CharField(source='vehicle.registration_number', read_only=True)
     document_type_display = serializers.CharField(source='get_document_type_display', read_only=True)
+    document_url = serializers.SerializerMethodField()
+    is_expired = serializers.SerializerMethodField()
+    days_until_expiry = serializers.SerializerMethodField()
     
     class Meta:
         model = VehicleDocument
         fields = [
             'id', 'vehicle', 'vehicle_registration', 'document_type', 
             'document_type_display', 'document_name', 'document_file',
-            'expiry_date', 'is_verified', 'uploaded_at'
+            'document_url', 'expiry_date', 'is_expired', 'days_until_expiry',
+            'is_verified', 'uploaded_at'
         ]
         read_only_fields = ['vehicle', 'is_verified', 'uploaded_at']
+    
+    def get_document_url(self, obj):
+        """
+        Generate absolute URL for document view endpoint
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if obj.document_file:
+            logger.info(f"Processing document {obj.id} with file: {obj.document_file.name}")
+            
+            request = self.context.get('request')
+            if request:
+                logger.info(f"Request context available, host: {request.get_host()}")
+                # Use your dedicated document view endpoint
+                from django.urls import reverse
+                try:
+                    document_view_url = reverse('document-view', kwargs={'document_id': obj.id})
+                    full_url = request.build_absolute_uri(f'/api/vehicles{document_view_url}')
+                    logger.info(f"Generated document URL: {full_url}")
+                    print(f"Document URL: {full_url}")
+                    return full_url
+                except Exception as e:
+                    logger.error(f"Error generating document URL: {e}")
+                    print(f"Error generating document URL: {e}")
+                    # Fallback to direct file URL if reverse fails
+                    fallback_url = request.build_absolute_uri(obj.document_file.url)
+                    logger.info(f"Using fallback URL: {fallback_url}")
+                    return fallback_url
+            else:
+                logger.warning("No request context available, using manual URL construction")
+                # Fallback: construct URL manually if no request context
+                from django.conf import settings
+                base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
+                document_url = f"/api/vehicles/documents/{obj.id}/"
+                full_url = f"{base_url.rstrip('/')}{document_url}"
+                logger.info(f"Manual document URL: {full_url}")
+                print(f"Manual document URL: {full_url}")
+                return full_url
+        else:
+            logger.warning(f"Document {obj.id} has no file attached")
+        return None
+    
 
+    
+    def get_is_expired(self, obj):
+        if obj.expiry_date:
+            from django.utils import timezone
+            return obj.expiry_date < timezone.now().date()
+        return False
+    
+    def get_days_until_expiry(self, obj):
+        if obj.expiry_date:
+            from django.utils import timezone
+            delta = obj.expiry_date - timezone.now().date()
+            return delta.days
+        return None
 
 class VehicleSerializer(serializers.ModelSerializer):
     owner_name = serializers.CharField(source='owner.username', read_only=True)
@@ -483,22 +543,112 @@ class EnhancedSaccoDashboardSerializer(serializers.Serializer):
             'recent_reviews': recent_reviews,
             'performance_trends': monthly_performance
         }
+# Enhanced Serializers (vehicles/serializers.py additions/fixes)
+
+class ApproveRequestSerializer(serializers.Serializer):
+    """Serializer for approving vehicle join requests"""
+    admin_notes = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        help_text="Optional notes from admin about the approval"
+    )
+    
+    def validate_admin_notes(self, value):
+        if value:
+            return value.strip()
+        return value
+
+
+class RejectRequestSerializer(serializers.Serializer):
+    """Serializer for rejecting vehicle join requests"""
+    rejection_reason = serializers.CharField(
+        max_length=500,
+        required=True,
+        help_text="Reason for rejecting the request"
+    )
+    admin_notes = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        help_text="Optional additional notes from admin"
+    )
+    
+    def validate_reason(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Rejection reason cannot be empty")
+        return value.strip()
+    
+    def validate_admin_notes(self, value):
+        if value:
+            return value.strip()
+        return value
+
+
+class SaccoJoinRequestSerializer(serializers.ModelSerializer):
+    vehicle_registration = serializers.CharField(source='vehicle.registration_number', read_only=True)
+    vehicle_make_model = serializers.SerializerMethodField(read_only=True)
+    sacco_name = serializers.CharField(source='sacco.name', read_only=True)
+    owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
+    processed_by_name = serializers.CharField(source='processed_by.get_full_name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    preferred_routes_names = serializers.SerializerMethodField(read_only=True)
+    days_pending = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = SaccoJoinRequest
+        fields = [
+            'id', 'vehicle', 'vehicle_registration', 'vehicle_make_model',
+            'sacco', 'sacco_name', 'owner', 'owner_name',
+            'preferred_routes', 'preferred_routes_names', 'experience_years',
+            'reason_for_joining', 'status', 'status_display',
+            'requested_at', 'processed_at', 'processed_by', 'processed_by_name',
+            # 'rejection_reason',
+              'admin_notes', 'days_pending'
+        ]
+        read_only_fields = [
+            'vehicle', 'sacco', 'owner', 'status', 'processed_at', 
+            'processed_by', 
+            # 'rejection_reason',
+              'admin_notes'
+        ]
+    
+    def get_vehicle_make_model(self, obj):
+        return f"{obj.vehicle.make} {obj.vehicle.model}"
+    
+    def get_preferred_routes_names(self, obj):
+        return [route.get_route_name() for route in obj.preferred_routes.all()]
+    
+    def get_days_pending(self, obj):
+        if obj.status == 'pending':
+            from django.utils import timezone
+            delta = timezone.now() - obj.requested_at
+            return delta.days
+        return None
+
+
 class SaccoAdminJoinRequestSerializer(serializers.ModelSerializer):
+    """Detailed serializer for sacco admins to view join requests"""
     vehicle_details = VehicleSerializer(source='vehicle', read_only=True)
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
     owner_email = serializers.CharField(source='owner.email', read_only=True)
     owner_phone = serializers.CharField(source='owner.phone_number', read_only=True)
     preferred_routes_details = serializers.SerializerMethodField(read_only=True)
-    vehicle_documents = serializers.SerializerMethodField(read_only=True)
+    vehicle_documents = VehicleDocumentSerializer(source='vehicle.documents', many=True, read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    processed_by_name = serializers.CharField(source='processed_by.get_full_name', read_only=True)
+    days_pending = serializers.SerializerMethodField(read_only=True)
+    vehicle_owner_stats = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = SaccoJoinRequest
         fields = [
             'id', 'vehicle', 'vehicle_details', 'owner', 'owner_name',
             'owner_email', 'owner_phone', 'preferred_routes', 'preferred_routes_details',
-            'experience_years', 'reason_for_joining', 'status',
-            'requested_at', 'processed_at', 'processed_by', 'admin_notes',
-            'vehicle_documents'
+            'experience_years', 'reason_for_joining', 'status', 'status_display',
+            'requested_at', 'processed_at', 'processed_by', 'processed_by_name',
+            'admin_notes', 'vehicle_documents', 'days_pending',
+            'vehicle_owner_stats'
         ]
         read_only_fields = ['vehicle', 'owner', 'requested_at']
     
@@ -509,11 +659,70 @@ class SaccoAdminJoinRequestSerializer(serializers.ModelSerializer):
                 'id': route.id,
                 'name': route.get_route_name(),
                 'fare': float(route.fare),
-                'distance': float(route.distance)
+                'distance': float(route.distance),
+                'duration': str(route.duration) if route.duration else None
             }
             for route in routes
         ]
+    def get_vehicle_details(self, obj):
+        if obj.vehicle:
+            return {
+                'id': obj.vehicle.id,
+                'registration_number': obj.vehicle.registration_number,
+                'make': obj.vehicle.make,
+                'model': obj.vehicle.model,
+                'year': obj.vehicle.year,
+                'vehicle_type': obj.vehicle.vehicle_type,
+                'seating_capacity': obj.vehicle.seating_capacity,
+                'color': obj.vehicle.color,
+                'fuel_type': obj.vehicle.fuel_type,
+            }
+        return None
+    
     
     def get_vehicle_documents(self, obj):
-        documents = VehicleDocument.objects.filter(vehicle=obj.vehicle)
-        return VehicleDocumentSerializer(documents, many=True).data
+        if obj.vehicle:
+            documents = VehicleDocument.objects.filter(vehicle=obj.vehicle)
+            return VehicleDocumentSerializer(documents, many=True, context=self.context).data
+        return []
+
+    def get_days_pending(self, obj):
+        if obj.status == 'pending':
+            from django.utils import timezone
+            delta = timezone.now() - obj.requested_at
+            return delta.days
+        return None
+    
+    def get_vehicle_owner_stats(self, obj):
+        """Get statistics about the vehicle owner"""
+        owner = obj.owner
+        vehicles_count = Vehicle.objects.filter(owner=owner).count()
+        active_vehicles = Vehicle.objects.filter(owner=owner, is_active=True).count()
+        vehicles_in_saccos = Vehicle.objects.filter(
+            owner=owner, 
+            sacco__isnull=False,
+            is_approved_by_sacco=True
+        ).count()
+        
+        return {
+            'total_vehicles': vehicles_count,
+            'active_vehicles': active_vehicles,
+            'vehicles_in_saccos': vehicles_in_saccos,
+            'join_date': owner.date_joined.strftime('%Y-%m-%d') if owner.date_joined else None
+        }
+
+
+class JoinRequestSummarySerializer(serializers.Serializer):
+    """Summary serializer for dashboard statistics"""
+    total_requests = serializers.IntegerField()
+    pending_requests = serializers.IntegerField()
+    approved_requests = serializers.IntegerField()
+    rejected_requests = serializers.IntegerField()
+    requests_this_month = serializers.IntegerField()
+    average_processing_days = serializers.FloatField()
+    
+    # Recent requests
+    recent_requests = SaccoJoinRequestSerializer(many=True)
+    
+    # Requests by status
+    requests_by_status = serializers.DictField()

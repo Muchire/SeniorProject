@@ -9,7 +9,15 @@ class Route(models.Model):
     duration = models.DurationField()
     fare = models.DecimalField(max_digits=10, decimal_places=2)
     sacco = models.ForeignKey(Sacco, on_delete=models.CASCADE, related_name='routes')
+    # Financial metrics for vehicle owners
+    avg_daily_trips = models.IntegerField(null=True, blank=True)
+    avg_monthly_revenue = models.DecimalField(max_digits=12, decimal_places=2,null=True, blank=True)
+    peak_hours_multiplier = models.DecimalField(max_digits=3, decimal_places=2,null=True, blank=True)
+    seasonal_variance = models.DecimalField(max_digits=3, decimal_places=2,null=True, blank=True)
     
+    # Operating costs
+    fuel_cost_per_km = models.DecimalField(max_digits=6, decimal_places=2,null=True, blank=True)
+    maintenance_cost_per_month = models.DecimalField(max_digits=8, decimal_places=2,null=True, blank=True)   
     
     def __str__(self):
         return f"{self.start_location} to {self.end_location} with {self.sacco.name}"
