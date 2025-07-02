@@ -18,10 +18,13 @@ class SaccoEmailService:
         try:
             subject = f"PSV Finder - Join Request Submitted to {join_request.sacco.name}"
             
+            # Get vehicle documents for attachment info
+            vehicle_documents = join_request.vehicle.documents.all()
+            documents_count = vehicle_documents.count()
+            
             # Create HTML email content
             html_content = f"""
-            <!DOCTYPE html>git fetch origin
-git status
+            <!DOCTYPE html>
             <html>
             <head>
                 <style>
@@ -30,6 +33,7 @@ git status
                     .header {{ background: #4CAF50; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
                     .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
                     .info-box {{ background: white; padding: 20px; border-left: 4px solid #4CAF50; margin: 20px 0; }}
+                    .documents-box {{ background: #E8F5E8; padding: 15px; border-radius: 6px; border-left: 4px solid #4CAF50; margin: 20px 0; }}
                     .highlight {{ color: #4CAF50; font-weight: bold; }}
                 </style>
             </head>
@@ -53,8 +57,21 @@ git status
                             <p><strong>Status:</strong> Under Review</p>
                         </div>
                         
+                        <div class="documents-box">
+                            <h3>📎 Documents Submitted ({documents_count} files):</h3>
+                            <p>Your application includes the following documents that have been forwarded to the Sacco administrators:</p>
+                            <ul>
+                                <li>Vehicle Logbook</li>
+                                <li>Insurance Certificate</li>
+                                <li>Inspection Certificate</li>
+                                <li>Driving License</li>
+                                <li>PSV Permit</li>
+                            </ul>
+                            <p><em>All documents have been securely transmitted for review.</em></p>
+                        </div>
+                        
                         <h3>What happens next?</h3>
-                        <p>• Your application is now under review by {join_request.sacco.name} administrators</p>
+                        <p>• Your application and documents are now under review by {join_request.sacco.name} administrators</p>
                         <p>• You will receive an email notification once your request is processed</p>
                         <p>• The review process typically takes 2-5 business days</p>
                         
@@ -87,8 +104,10 @@ git status
             - Vehicle: {join_request.vehicle.registration_number}
             - Sacco: {join_request.sacco.name}
             - Date: {join_request.requested_at.strftime('%B %d, %Y at %I:%M %p')}
+            - Documents Submitted: {documents_count} files
             
-            Your application is now under review. You will receive an email notification once processed.
+            Your application and all supporting documents are now under review. 
+            You will receive an email notification once processed.
             
             Sacco Contact: {join_request.sacco.contact_number or 'Not provided'}
             
@@ -96,16 +115,47 @@ git status
             The PSV Finder Team
             """
             
-            send_mail(
+            # Create EmailMultiAlternatives for HTML support
+            email = EmailMultiAlternatives(
                 subject=subject,
-                message=plain_message,
+                body=plain_message,
                 from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[join_request.owner.email],
-                html_message=html_content,
-                fail_silently=False,
+                to=[join_request.owner.email],
             )
             
-            logger.info(f"Join request confirmation email sent to {join_request.owner.email}")
+            # Attach HTML version
+            email.attach_alternative(html_content, "text/html")
+            
+            # Attach documents as copies for owner's records
+            attached_count = 0
+            for document in vehicle_documents:
+                try:
+                    if document.document_file and hasattr(document.document_file, 'read'):
+                        # Reset file pointer to beginning
+                        document.document_file.seek(0)
+                        file_content = document.document_file.read()
+                        
+                        # Determine filename
+                        filename = f"Your_{document.document_name or document.document_type}_{document.id}"
+                        if not filename.lower().endswith(('.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx')):
+                            if hasattr(document.document_file, 'name'):
+                                _, ext = os.path.splitext(document.document_file.name)
+                                filename += ext
+                            else:
+                                filename += '.pdf'
+                        
+                        # Attach file to email
+                        email.attach(filename, file_content, 'application/octet-stream')
+                        attached_count += 1
+                        
+                except Exception as doc_error:
+                    logger.error(f"Failed to attach document {document.id} to confirmation email: {str(doc_error)}")
+                    continue
+            
+            # Send the email
+            email.send(fail_silently=False)
+            
+            logger.info(f"Join request confirmation email sent to {join_request.owner.email} with {attached_count} attachments")
             return True
             
         except Exception as e:
@@ -318,7 +368,7 @@ git status
     
     @staticmethod
     def send_admin_new_request_notification(join_request):
-        """Send notification to sacco admin about new join request"""
+        """Send notification to sacco admin about new join request with document attachments"""
         try:
             # Get the sacco admin from the sacco_admin field
             sacco_admin = join_request.sacco.sacco_admin
@@ -331,7 +381,11 @@ git status
                 logger.warning(f"Sacco admin {sacco_admin.username} has no email address")
                 return False
             
-            subject = f"🚌 PSV Finder - New Join Request for {join_request.sacco.name}"
+            subject = f"🚌 PSV Finder - New Join Request for {join_request.sacco.name} (Documents Attached)"
+            
+            # Get vehicle documents related to this request
+            vehicle_documents = join_request.vehicle.documents.all()
+            documents_count = vehicle_documents.count()
             
             html_content = f"""
             <!DOCTYPE html>
@@ -339,28 +393,32 @@ git status
             <head>
                 <style>
                     body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ background: #2196F3; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                    .container {{ max-width: 700px; margin: 0 auto; padding: 20px; }}
+                    .header {{ background: linear-gradient(135deg, #2196F3, #1976D2); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
                     .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
-                    .request-box {{ background: white; padding: 20px; border-left: 4px solid #2196F3; margin: 20px 0; }}
+                    .request-box {{ background: white; padding: 20px; border-left: 4px solid #2196F3; margin: 20px 0; border-radius: 0 8px 8px 0; }}
                     .owner-box {{ background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 15px 0; }}
                     .vehicle-box {{ background: #f3e5f5; padding: 15px; border-radius: 5px; margin: 15px 0; }}
+                    .documents-box {{ background: #E8F5E8; padding: 15px; border-radius: 6px; border-left: 4px solid #4CAF50; margin: 20px 0; }}
+                    .action-box {{ background: #FFF3E0; padding: 15px; border-radius: 6px; border-left: 4px solid #FF9800; margin: 20px 0; }}
                     .highlight {{ color: #2196F3; font-weight: bold; }}
+                    .status-badge {{ background: #FFA726; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }}
                 </style>
             </head>
             <body>
                 <div class="container">
                     <div class="header">
-                        <h1>🚌 PSV Finder Admin</h1>
-                        <h2>New Join Request</h2>
+                        <h1>🚌 PSV Finder Admin Portal</h1>
+                        <h2>New SACCO Join Request</h2>
+                        <span class="status-badge">PENDING REVIEW</span>
                     </div>
                     <div class="content">
                         <p>Hello <strong>{sacco_admin.get_full_name() or sacco_admin.username}</strong>,</p>
                         
-                        <p>You have received a new join request for <strong>{join_request.sacco.name}</strong> that requires your review.</p>
+                        <p>You have received a new join request for <strong>{join_request.sacco.name}</strong> that requires your immediate attention.</p>
                         
                         <div class="request-box">
-                            <h3>Request Details:</h3>
+                            <h3>📋 Request Overview:</h3>
                             <p><strong>Request ID:</strong> #{join_request.id}</p>
                             <p><strong>Submission Date:</strong> {join_request.requested_at.strftime('%B %d, %Y at %I:%M %p')}</p>
                             <p><strong>Status:</strong> Pending Review</p>
@@ -371,31 +429,54 @@ git status
                             <p><strong>Name:</strong> {join_request.owner.get_full_name() or join_request.owner.username}</p>
                             <p><strong>Email:</strong> {join_request.owner.email}</p>
                             <p><strong>Phone:</strong> {getattr(join_request.owner, 'phone_number', 'Not provided')}</p>
+                            <p><strong>License Number:</strong> {getattr(join_request, 'license_number', 'Not provided')}</p>
+                            <p><strong>Experience:</strong> {getattr(join_request, 'experience_years', 'Not specified')} years</p>
+                            <p><strong>Route Preference:</strong> {getattr(join_request, 'route_preference', 'Not specified')}</p>
                         </div>
                         
                         <div class="vehicle-box">
                             <h3>🚗 Vehicle Information:</h3>
                             <p><strong>Registration:</strong> {join_request.vehicle.registration_number}</p>
-                            <p><strong>Make:</strong> {getattr(join_request.vehicle, 'make', 'Not specified')}</p>
-                            <p><strong>Model:</strong> {getattr(join_request.vehicle, 'model', 'Not specified')}</p>
+                            <p><strong>Make/Model:</strong> {getattr(join_request.vehicle, 'make', 'Not specified')} {getattr(join_request.vehicle, 'model', 'Not specified')}</p>
                             <p><strong>Year:</strong> {getattr(join_request.vehicle, 'year', 'Not specified')}</p>
                             <p><strong>Capacity:</strong> {getattr(join_request.vehicle, 'passenger_capacity', 'Not specified')} passengers</p>
+                            <p><strong>Insurance Status:</strong> {'✅ Has Valid Insurance' if getattr(join_request, 'has_insurance', False) else '❌ Insurance Status Unknown'}</p>
+                            <p><strong>License Status:</strong> {'✅ Has Valid PSV License' if getattr(join_request, 'has_valid_license', False) else '❌ License Status Unknown'}</p>
                         </div>
                         
-                        <h3>Required Actions:</h3>
-                        <ul>
-                            <li>Review the vehicle documents</li>
-                            <li>Verify owner credentials</li>
-                            <li>Approve or reject the request</li>
-                            <li>Notify the owner of your decision</li>
-                        </ul>
+                        <div class="documents-box">
+                            <h3>📎 Attached Documents ({documents_count} files):</h3>
+                            <p><strong>All required vehicle documents have been attached to this email for your review:</strong></p>
+                            <ul>
+                                <li>Vehicle Logbook</li>
+                                <li>Insurance Certificate</li>
+                                <li>Inspection Certificate</li>
+                                <li>Driving License</li>
+                                <li>PSV Permit</li>
+                            </ul>
+                            <p><em>Please review all attached documents before making your decision.</em></p>
+                        </div>
                         
-                        <p>Please log into your admin panel to review this request and make a decision.</p>
+                        <div class="action-box">
+                            <h3>⚡ Required Actions:</h3>
+                            <ul>
+                                <li><strong>Review attached documents</strong> - Check all vehicle documentation</li>
+                                <li><strong>Verify owner credentials</strong> - Confirm license and contact details</li>
+                                <li><strong>Assess vehicle condition</strong> - Review inspection certificates</li>
+                                <li><strong>Make decision</strong> - Approve or reject the application</li>
+                                <li><strong>Respond to applicant</strong> - Notify owner of your decision</li>
+                            </ul>
+                        </div>
                         
-                        <p><strong>Note:</strong> The vehicle owner has been notified that their request is under review.</p>
+                        <div style="text-align: center; margin: 30px 0; background: #E1F5FE; padding: 15px; border-radius: 6px;">
+                            <p><strong>⏰ Please review this application within 48 hours</strong></p>
+                            <p>The vehicle owner has been notified that their request is under review.</p>
+                        </div>
                         
-                        <p>Best regards,<br>
-                        The PSV Finder System</p>
+                        <div style="text-align: center; margin-top: 30px; color: #666; font-size: 12px;">
+                            <p>This is an automated notification from PSV Finder System<br>
+                            For technical support, contact: support@psvfinder.com</p>
+                        </div>
                     </div>
                 </div>
             </body>
@@ -403,42 +484,94 @@ git status
             """
             
             plain_message = f"""
-            PSV Finder - New Join Request
+            PSV FINDER - NEW SACCO JOIN REQUEST
             
             Hello {sacco_admin.get_full_name() or sacco_admin.username},
             
-            You have a new join request for {join_request.sacco.name} to review:
+            You have a new join request for {join_request.sacco.name} requiring your review.
             
-            Request #: {join_request.id}
-            Date: {join_request.requested_at.strftime('%B %d, %Y at %I:%M %p')}
+            REQUEST DETAILS:
+            - Request ID: #{join_request.id}
+            - Submission Date: {join_request.requested_at.strftime('%B %d, %Y at %I:%M %p')}
+            - Status: Pending Review
             
-            Owner: {join_request.owner.get_full_name() or join_request.owner.username}
-            Email: {join_request.owner.email}
+            VEHICLE OWNER:
+            - Name: {join_request.owner.get_full_name() or join_request.owner.username}
+            - Email: {join_request.owner.email}
+            - Phone: {getattr(join_request.owner, 'phone_number', 'Not provided')}
+            - License: {getattr(join_request, 'license_number', 'Not provided')}
+            - Experience: {getattr(join_request, 'experience_years', 'Not specified')} years
             
-            Vehicle: {join_request.vehicle.registration_number}
-            Make/Model: {getattr(join_request.vehicle, 'make', 'Not specified')} {getattr(join_request.vehicle, 'model', 'Not specified')}
-            Year: {getattr(join_request.vehicle, 'year', 'Not specified')}
+            VEHICLE DETAILS:
+            - Registration: {join_request.vehicle.registration_number}
+            - Make/Model: {getattr(join_request.vehicle, 'make', 'Not specified')} {getattr(join_request.vehicle, 'model', 'Not specified')}
+            - Year: {getattr(join_request.vehicle, 'year', 'Not specified')}
+            - Capacity: {getattr(join_request.vehicle, 'passenger_capacity', 'Not specified')} passengers
             
-            Please review and process this request in your admin panel.
+            ATTACHED DOCUMENTS ({documents_count} files):
+            All required vehicle documents are attached to this email for your review.
+            
+            REQUIRED ACTIONS:
+            1. Review all attached documents
+            2. Verify owner credentials
+            3. Assess vehicle suitability
+            4. Approve or reject application
+            5. Notify applicant of decision
+            
+            Please process this request within 48 hours.
             
             Best regards,
             PSV Finder System
             """
             
-            send_mail(
+            # Create email message with attachments
+            email = EmailMultiAlternatives(
                 subject=subject,
-                message=plain_message,
+                body=plain_message,
                 from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[sacco_admin.email],
-                html_message=html_content,
-                fail_silently=False,
+                to=[sacco_admin.email],
             )
             
-            logger.info(f"New request notification sent to sacco admin {sacco_admin.email}")
+            # Attach HTML version
+            email.attach_alternative(html_content, "text/html")
+            
+            # Attach documents
+            attached_count = 0
+            for document in vehicle_documents:
+                try:
+                    if document.document_file and hasattr(document.document_file, 'read'):
+                        # Reset file pointer to beginning
+                        document.document_file.seek(0)
+                        file_content = document.document_file.read()
+                        
+                        # Determine filename
+                        filename = document.document_name or f"{document.document_type}_{document.id}"
+                        if not filename.lower().endswith(('.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx')):
+                            # Try to get extension from the file field
+                            if hasattr(document.document_file, 'name'):
+                                _, ext = os.path.splitext(document.document_file.name)
+                                filename += ext
+                            else:
+                                filename += '.pdf'  # Default extension
+                        
+                        # Attach file to email
+                        email.attach(filename, file_content, 'application/octet-stream')
+                        attached_count += 1
+                        
+                        logger.info(f"Attached document: {filename} ({len(file_content)} bytes)")
+                        
+                except Exception as doc_error:
+                    logger.error(f"Failed to attach document {document.id}: {str(doc_error)}")
+                    continue
+            
+            # Send the email
+            email.send(fail_silently=False)
+            
+            logger.info(f"New request notification sent to {sacco_admin.email} with {attached_count} attachments")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to send admin notification email: {str(e)}")
+            logger.error(f"Failed to send admin notification email with documents: {str(e)}")
             return False
     
     @staticmethod

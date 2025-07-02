@@ -1,5 +1,10 @@
 import logging
+import random
+import string
+from django.core.cache import cache
 from rest_framework.views import APIView
+from datetime import timedelta
+from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -7,7 +12,7 @@ from rest_framework.authtoken.models import Token
 from django.contrib.auth import get_user_model
 from reviews.models import PassengerReview
 from reviews.models import OwnerReview
-from .models import User
+from .models import User,PasswordResetOTP
 from .serializers import (
     RegisterSerializer, LoginSerializer,
     UserSerializer, SwitchUserModeSerializer,ChangePasswordSerializer,UpdateProfileSerializer,UserProfileSerializer
@@ -673,3 +678,231 @@ def auth_status(request):
             'authenticated': False,
             'user': None
         })
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def send_password_reset_otp(request):
+    """
+    Send OTP to email for password reset
+    """
+    try:
+        email = request.data.get('email')
+        if not email:
+            return Response(
+                {'error': 'Email is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if user exists
+        try:
+            User.objects.get(email=email)
+        except User.DoesNotExist:
+            # For security, don't reveal if email exists or not
+            return Response(
+                {'message': 'If this email exists in our system, you will receive an OTP shortly.'}, 
+                status=status.HTTP_200_OK
+            )
+        
+        # Generate 6-digit OTP
+        otp = ''.join(random.choices(string.digits, k=6))
+        
+        # Delete any existing OTPs for this email
+        PasswordResetOTP.objects.filter(email=email).delete()
+        
+        # Create new OTP record
+        PasswordResetOTP.objects.create(
+            email=email,
+            otp=otp,
+            expires_at=timezone.now() + timedelta(minutes=10)
+        )
+        
+        # Send OTP via email
+        subject = 'PSV Finder - Password Reset OTP'
+        message = f"""
+        Hello,
+        
+        You requested a password reset for your PSV Finder account.
+        
+        Your OTP code is: {otp}
+        
+        This code will expire in 10 minutes.
+        
+        If you didn't request this reset, please ignore this email.
+        
+        Best regards,
+        PSV Finder Team
+        """
+        
+        try:
+            send_mail(
+                subject,
+                message,
+                settings.DEFAULT_FROM_EMAIL,
+                [email],
+                fail_silently=False,
+            )
+            
+            return Response(
+                {
+                    'message': 'OTP sent successfully to your email',
+                    'success': True
+                }, 
+                status=status.HTTP_200_OK
+            )
+        except Exception as e:
+            logger.error(f"Failed to send OTP email: {str(e)}")
+            return Response(
+                {'error': 'Failed to send email. Please try again later.'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
+    except Exception as e:
+        logger.error(f"Send OTP error: {str(e)}")
+        return Response(
+            {'error': 'An error occurred. Please try again later.'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_password_reset_otp(request):
+    """
+    Verify the OTP for password reset
+    """
+    try:
+        email = request.data.get('email')
+        otp = request.data.get('otp')
+        
+        if not email or not otp:
+            return Response(
+                {'error': 'Email and OTP are required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Find the OTP record
+        try:
+            otp_record = PasswordResetOTP.objects.filter(
+                email=email,
+                otp=otp,
+                is_used=False
+            ).latest('created_at')
+        except PasswordResetOTP.DoesNotExist:
+            return Response(
+                {'error': 'Invalid OTP'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if OTP is expired
+        if otp_record.is_expired():
+            return Response(
+                {'error': 'OTP has expired. Please request a new one.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verify that user exists
+        try:
+            User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        return Response(
+            {
+                'message': 'OTP verified successfully',
+                'success': True,
+                'email': email
+            }, 
+            status=status.HTTP_200_OK
+        )
+    
+    except Exception as e:
+        logger.error(f"OTP verification error: {str(e)}")
+        return Response(
+            {'error': 'An error occurred. Please try again later.'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def reset_password_with_otp(request):
+    """
+    Reset password using verified OTP
+    """
+    try:
+        email = request.data.get('email')
+        otp = request.data.get('otp')
+        new_password = request.data.get('new_password')
+        
+        if not email or not otp or not new_password:
+            return Response(
+                {'error': 'Email, OTP, and new password are required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate password strength (optional)
+        if len(new_password) < 8:
+            return Response(
+                {'error': 'Password must be at least 8 characters long'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Find the OTP record
+        try:
+            otp_record = PasswordResetOTP.objects.filter(
+                email=email,
+                otp=otp,
+                is_used=False
+            ).latest('created_at')
+        except PasswordResetOTP.DoesNotExist:
+            return Response(
+                {'error': 'Invalid OTP'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if OTP is expired
+        if otp_record.is_expired():
+            return Response(
+                {'error': 'OTP has expired. Please request a new one.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get the user
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Reset the password
+        user.set_password(new_password)
+        user.save()
+        
+        # Mark OTP as used
+        otp_record.is_used = True
+        otp_record.save()
+        
+        # Delete all OTP records for this email for security
+        PasswordResetOTP.objects.filter(email=email).delete()
+        
+        # Optionally, you can revoke all existing tokens for this user
+        # Token.objects.filter(user=user).delete()
+        
+        return Response(
+            {
+                'message': 'Password reset successfully',
+                'success': True
+            }, 
+            status=status.HTTP_200_OK
+        )
+    
+    except Exception as e:
+        logger.error(f"Password reset with OTP error: {str(e)}")
+        return Response(
+            {'error': 'An error occurred. Please try again later.'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+   

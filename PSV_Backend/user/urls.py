@@ -6,7 +6,8 @@ from .views import (
     SwitchUserModeView, UserListView, UserProfileView, UserReviewsView,
     UpdateProfileView, ChangePasswordView, DeactivateUserView, google_auth,
     request_password_reset, validate_reset_token, reset_password,
-    GoogleLoginView, google_login_redirect, google_logout_view, auth_status
+    GoogleLoginView, google_login_redirect, google_logout_view, auth_status,
+    send_password_reset_otp, verify_password_reset_otp, reset_password_with_otp
 )
 
 
@@ -33,7 +34,10 @@ urlpatterns = [
     
     # Django Allauth Google OAuth
     path('auth/google/login/', include('allauth.socialaccount.urls')),
-    
+    path('auth/password-reset/send-otp/', send_password_reset_otp, name='send_password_reset_otp'),
+    path('auth/password-reset/verify-otp/', verify_password_reset_otp, name='verify_password_reset_otp'),
+    path('auth/password-reset/confirm/', reset_password_with_otp, name='reset_password_with_otp'),
+        
     # Basic Authentication
     path('register/', RegisterView.as_view(), name='register'),
     path('login/', LoginView.as_view(), name='login'),
