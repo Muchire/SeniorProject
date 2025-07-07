@@ -23,4 +23,4 @@ COPY . /app/
 EXPOSE 8000
 
 # Start the server using gunicorn
-CMD ["gunicorn", "PSV_Backend.wsgi:application", "--bind", "0.0.0.0:8000"]
+CMD ["gunicorn", "PSV_Backend.PSV_Backend.wsgi:application", "--bind", "0.0.0.0:8000"]
