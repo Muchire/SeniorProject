@@ -59,6 +59,86 @@ class VehicleDetailView(generics.RetrieveUpdateDestroyAPIView):
     
     def get_queryset(self):
         return Vehicle.objects.filter(owner=self.request.user)
+class SaccoVehicleListView(generics.ListAPIView):
+    """
+    List all vehicles that belong to a specific sacco.
+    URL can include sacco_id or auto-detect from admin.
+    """
+    serializer_class = VehicleSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        # Try to get sacco_id from URL parameters first
+        sacco_id = self.kwargs.get('sacco_id')
+        
+        if sacco_id:
+            # If sacco_id is provided, verify admin has permission for this sacco
+            try:
+                sacco = Sacco.objects.get(id=sacco_id)
+                # Check if the current user is admin of this sacco
+                if sacco.admin != self.request.user:
+                    return Vehicle.objects.none()
+            except Sacco.DoesNotExist:
+                return Vehicle.objects.none()
+        else:
+            # Auto-detect sacco from authenticated admin
+            try:
+                sacco = Sacco.objects.get(admin=self.request.user)
+            except Sacco.DoesNotExist:
+                return Vehicle.objects.none()
+        
+        # Return all vehicles that belong to this sacco
+        # Using the join request relationship
+        approved_requests = SaccoJoinRequest.objects.filter(
+            sacco=sacco,
+            status='approved'
+        ).values_list('vehicle_id', flat=True)
+        
+        return Vehicle.objects.filter(
+            id__in=approved_requests
+        ).select_related('owner').order_by('-created_at')
+    
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        
+        # Get sacco information
+        sacco_id = self.kwargs.get('sacco_id')
+        try:
+            if sacco_id:
+                sacco = Sacco.objects.get(id=sacco_id)
+                # Verify admin permission
+                if sacco.admin != request.user:
+                    return Response(
+                        {'error': 'You do not have permission to view this sacco\'s vehicles'}, 
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+            else:
+                sacco = Sacco.objects.get(admin=request.user)
+            
+            total_vehicles = queryset.count()
+            active_vehicles = queryset.filter(is_active=True).count()
+            pending_requests = SaccoJoinRequest.objects.filter(
+                sacco=sacco,
+                status='pending'
+            ).count()
+            
+            serializer = self.get_serializer(queryset, many=True)
+            
+            return Response({
+                'sacco_info': {
+                    'id': sacco.id,
+                    'name': sacco.name,
+                    'total_vehicles': total_vehicles,
+                    'active_vehicles': active_vehicles,
+                    'pending_requests': pending_requests,
+                },
+                'vehicles': serializer.data
+            })
+        except Sacco.DoesNotExist:
+            return Response(
+                {'error': 'No sacco found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
 
 
 class VehicleDocumentView(generics.ListCreateAPIView):

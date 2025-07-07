@@ -10,7 +10,7 @@ from .views import (
     VehicleMaintenanceView, VehicleRevenueAnalyticsView, VehicleComparisonView,
     VehicleAlertView, VehicleExportDataView, approve_sacco_request, reject_sacco_request,
     get_pending_sacco_requests, get_all_sacco_requests, get_join_request_detail,
-    get_vehicle_documents
+    get_vehicle_documents,SaccoVehicleListView
 )
 
 app_name = 'vehicles'
@@ -73,6 +73,8 @@ urlpatterns = [
     
     # Alerts and Notifications
     path('alerts/', VehicleAlertView.as_view(), name='vehicle-alerts'),
+    path('sacco/admin/vehicles/', SaccoVehicleListView.as_view(), name='sacco-admin-vehicles'),
+    path('sacco/<int:sacco_id>/admin/vehicles/', SaccoVehicleListView.as_view(), name='sacco-admin-vehicles'),
     
     # Export Data
     path('export/', VehicleExportDataView.as_view(), name='export-data'),
