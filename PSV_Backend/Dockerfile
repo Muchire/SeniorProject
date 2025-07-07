@@ -9,16 +9,16 @@ ENV key value  PYTHONUNBUFFERED 1
 
 # set work directory
 
-WORKDIR /app
+WORKDIR  /app
 
 #install dependacies
 
-COPY requirements.txt /app/
+COPY PSV_Backend/requirements.txt /app/
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 #copy project files
 
-COPY . /app/
+COPY . PSV_Backend/app/
 
 EXPOSE 8000
 
