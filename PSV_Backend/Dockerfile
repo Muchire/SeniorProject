@@ -13,12 +13,12 @@ WORKDIR  /app
 
 #install dependacies
 
-COPY PSV_Backend/requirements.txt /app/
+COPY requirements.txt /app/
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 #copy project files
 
-COPY . PSV_Backend/app/
+COPY . /app/
 
 EXPOSE 8000
 
